@@ -87,19 +87,6 @@ Start the development server:
 npm run dev
 ```
 
-Run tests:
-
-```bash
-# Run all tests
-npm test
-
-# Run with coverage
-npm run test:coverage
-
-# Run with UI
-npm run test:ui
-```
-
 Code quality checks:
 
 ```bash
