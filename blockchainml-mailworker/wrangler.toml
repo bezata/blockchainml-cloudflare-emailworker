@@ -1,0 +1,208 @@
+# Basic Configuration
+name = "blockchainml-mailworker"
+main = "src/index.ts"
+compatibility_date = "2024-10-29"
+compatibility_flags = ["nodejs_compat"]
+
+# Environment Variables
+[
+vars
+]
+ENVIRONMENT = "production"
+API_VERSION = "v1"
+MAX_ATTACHMENT_SIZE = "10485760"  # 10MB in bytes
+ALLOWED_MIME_TYPES = "application/pdf,image/jpeg,image/png,application/msword"
+EMAIL_RETENTION_DAYS = "30"
+SEARCH_INDEX_BATCH_SIZE = "100"
+
+# Development Environment
+[
+env.development
+]
+name = "blockchainml-mailworker-dev"
+vars = { ENVIRONMENT = "development" }
+
+# Staging Environment
+[
+env.staging
+]
+name = "blockchainml-mailworker-staging"
+vars = { ENVIRONMENT = "staging" }
+
+# KV Namespaces
+[[
+kv_namespaces
+]]
+binding = "EMAIL_STORE"
+id = "your-kv-id-for-email-store"
+preview_id = "your-preview-kv-id"
+
+[[
+kv_namespaces
+]]
+binding = "SEARCH_INDEX"
+id = "your-kv-id-for-search"
+preview_id = "your-preview-kv-id"
+
+[[
+kv_namespaces
+]]
+binding = "CACHE_STORE"
+id = "your-kv-id-for-cache"
+preview_id = "your-preview-kv-id"
+
+# R2 Buckets
+[[
+r2_buckets
+]]
+binding = "ATTACHMENT_BUCKET"
+bucket_name = "email-attachments"
+preview_bucket_name = "email-attachments-dev"
+
+[[
+r2_buckets
+]]
+binding = "BACKUP_BUCKET"
+bucket_name = "email-backups"
+preview_bucket_name = "email-backups-dev"
+
+# D1 Databases
+[[
+d1_databases
+]]
+binding = "EMAIL_DB"
+database_name = "blockchainml_mail"
+database_id = "your-d1-database-id"
+
+[[
+d1_databases
+]]
+binding = "ANALYTICS_DB"
+database_name = "blockchainml_analytics"
+database_id = "your-d1-analytics-id"
+
+# Queues
+[[
+queues.producers
+]]
+binding = "EMAIL_QUEUE"
+queue = "email-processing"
+
+[[
+queues.producers
+]]
+binding = "NOTIFICATION_QUEUE"
+queue = "notifications"
+
+[[
+queues.producers
+]]
+binding = "ANALYTICS_QUEUE"
+queue = "analytics"
+
+[[
+queues.consumers
+]]
+queue = "email-processing"
+max_batch_size = 10
+max_batch_timeout = 30
+max_retries = 3
+dead_letter_queue = "failed-emails"
+
+[[
+queues.consumers
+]]
+queue = "notifications"
+max_batch_size = 20
+max_batch_timeout = 15
+max_retries = 2
+
+# Durable Objects
+[[
+durable_objects.bindings
+]]
+name = "EMAIL_COUNTER"
+class_name = "EmailCounter"
+
+[[
+durable_objects.bindings
+]]
+name = "RATE_LIMITER"
+class_name = "RateLimiter"
+
+[[
+migrations
+]]
+tag = "v1"
+new_classes = ["EmailCounter", "RateLimiter"]
+
+# AI Configuration (if using Cloudflare AI)
+[
+ai
+]
+binding = "AI"
+
+# Monitoring and Analytics
+[
+observability
+]
+enabled = true
+head_sampling_rate = 1.0
+
+# Additional Service Bindings
+[
+services
+]
+search_service = { service = "search-worker", environment = "production" }
+analytics_service = { service = "analytics-worker", environment = "production" }
+
+# Build Configuration
+[
+build
+]
+command = "npm run build"
+watch_dir = "src"
+upload.format = "modules"
+upload.main = "dist/index.mjs"
+upload.dir = "dist"
+
+[
+miniflare
+]
+kv_persist = true
+r2_persist = true
+cache_persist = true
+durable_objects_persist = true
+
+# Security Headers
+[
+security_headers
+]
+x_content_type_options = "nosniff"
+x_frame_options = "DENY"
+x_xss_protection = "1; mode=block"
+content_security_policy = "default-src 'self'"
+
+# Resource Limits
+[
+limits
+]
+memory_mb = 128
+max_concurrent_requests = 50
+max_upload_size = "10MB"
+
+# Route Configuration
+[
+routes
+]
+"api/v1/*" = { pattern = "api/v1/*", zone_name = "yourdomain.com" }
+"*" = { pattern = "*", zone_name = "yourdomain.com" }
+
+# Triggers
+[
+triggers
+]
+crons = [
+  "0 0 * * * *", # Hourly maintenance
+  "0 0 0 * * *"  # Daily cleanup
+]
