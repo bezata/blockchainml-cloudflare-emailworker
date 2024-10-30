@@ -1,11 +1,12 @@
 import { Context, Next } from "hono";
+import { StatusCode } from "hono/utils/http-status";
 import { Logger } from "../../utils/logger";
 
 const logger = Logger.getInstance("production");
 
 export async function errorMiddleware(c: Context, next: Next) {
   try {
-    await next();
+    return await next();
   } catch (error) {
     logger.error("Unhandled error:", error);
 
@@ -35,7 +36,7 @@ export async function errorMiddleware(c: Context, next: Next) {
           }),
         },
       },
-      status
+      status as StatusCode
     );
   }
 }

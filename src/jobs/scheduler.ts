@@ -1,26 +1,78 @@
 import { Redis } from "@upstash/redis";
 import { Logger } from "../utils/logger";
 import { Helpers } from "../utils/helpers";
-import { Job, JobStatus, JobPriority, JobResult } from "./types";
+import {
+  JobStatus,
+  JobPriority,
+  JobResult,
+  TaskType,
+  TaskPayload,
+} from "./types";
 
-declare global {
-  namespace NodeJS {
-    interface ProcessEnv {
-      UPSTASH_REDIS_REST_URL: string;
-      UPSTASH_REDIS_REST_TOKEN: string;
-    }
-  }
+interface JobOptions {
+  priority?: JobPriority;
+  scheduledFor?: Date | undefined;
+  retryStrategy?: {
+    maxAttempts: number;
+    backoff: "exponential" | "linear";
+    initialDelay: number;
+  };
+  timeout?: number;
+  tags?: string[];
+}
+
+interface RetryStrategy {
+  maxAttempts: number;
+  backoff: "exponential" | "linear";
+  initialDelay: number;
+}
+
+type Env = "development" | "production" | "test";
+
+interface Job<T extends TaskPayload> {
+  id: string;
+  type: TaskType;
+  data: T;
+  env: Env;
+  priority: JobPriority;
+  status: JobStatus;
+  attempts: number;
+  maxAttempts: number;
+  retryStrategy: RetryStrategy;
+  timeout: number;
+  tags: string[];
+  createdAt: Date;
+  scheduledFor: Date;
+  lastError: string | null;
+  progress: number;
+  startedAt?: Date;
 }
 
 export class JobScheduler {
   private static instance: JobScheduler;
   private readonly redis: Redis;
   private readonly logger: Logger;
-  private readonly JOBS_KEY = "jobs:queue";
-  private readonly SCHEDULED_JOBS_KEY = "jobs:scheduled";
-  private readonly JOB_LOCKS_KEY = "jobs:locks";
-  private readonly JOB_RESULTS_KEY = "jobs:results";
-  private readonly DEAD_LETTER_QUEUE = "jobs:dlq";
+
+  // Redis keys
+  private readonly KEYS = {
+    QUEUE: "jobs:queue",
+    SCHEDULED: "jobs:scheduled",
+    LOCKS: "jobs:locks",
+    RESULTS: "jobs:results",
+    DLQ: "jobs:dlq",
+    TAGS: "jobs:tags",
+    METRICS: "jobs:metrics",
+    STATUS: "jobs:status",
+  } as const;
+
+  // Default configurations
+  private readonly DEFAULTS = {
+    LOCK_TIMEOUT: 300, // 5 minutes
+    JOB_TIMEOUT: 300000, // 5 minutes
+    RETRY_ATTEMPTS: 3,
+    RETRY_DELAY: 1000,
+    BATCH_SIZE: 100,
+  } as const;
 
   constructor() {
     this.redis = new Redis({
@@ -37,62 +89,56 @@ export class JobScheduler {
     return JobScheduler.instance;
   }
 
-  async enqueue(job: {
-    type: string;
-    data: Record<string, any>;
-    priority: JobPriority;
-    retryStrategy?: {
-      maxAttempts?: number;
-      backoff?: "exponential" | "linear";
-      initialDelay?: number;
-    };
-    timeout?: number;
-    tags?: string[];
-  }): Promise<string> {
-    const defaultRetryStrategy = {
-      maxAttempts: 3,
-      backoff: "exponential" as const,
-      initialDelay: 1000, // 1 second
-    };
-
-    return this.scheduleJob(job.type, job.data, {
-      priority: job.priority,
-      retryStrategy: { ...defaultRetryStrategy, ...job.retryStrategy },
-      timeout: job.timeout || 300000, // 5 minutes default
-      tags: job.tags || [],
-    });
-  }
-
-  async scheduleJob(
-    type: string,
-    data: Record<string, any>,
-    options: {
-      priority?: JobPriority;
-      scheduledFor?: Date;
-      retryStrategy?: {
-        maxAttempts: number;
-        backoff: "exponential" | "linear";
-        initialDelay: number;
-      };
-      timeout?: number;
-      tags?: string[];
-    } = {}
+  async enqueue<T extends TaskPayload>(
+    type: TaskType,
+    data: T,
+    options: Partial<JobOptions> = {}
   ): Promise<string> {
     try {
-      const job: Job = {
+      const defaultRetryStrategy: RetryStrategy = {
+        maxAttempts: this.DEFAULTS.RETRY_ATTEMPTS,
+        backoff: "exponential",
+        initialDelay: this.DEFAULTS.RETRY_DELAY,
+      };
+
+      return await this.scheduleJob(type, data, {
+        priority: options.priority || JobPriority.NORMAL,
+        retryStrategy: { ...defaultRetryStrategy, ...options.retryStrategy },
+        timeout: options.timeout || this.DEFAULTS.JOB_TIMEOUT,
+        tags: options.tags || [],
+        scheduledFor: options.scheduledFor,
+      });
+    } catch (error) {
+      this.logger.error("Failed to enqueue job:", {
+        type,
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+      throw error;
+    }
+  }
+
+  async scheduleJob<T extends TaskPayload>(
+    type: TaskType,
+    data: T,
+    options: JobOptions
+  ): Promise<string> {
+    try {
+      const job: Job<T> = {
         id: Helpers.generateId(),
         type,
         data,
+        env: (process.env.NODE_ENV as Env) || "production",
         priority: options.priority || JobPriority.NORMAL,
         status: options.scheduledFor ? JobStatus.SCHEDULED : JobStatus.PENDING,
         attempts: 0,
-        maxAttempts: options.retryStrategy?.maxAttempts || 3,
+        maxAttempts:
+          options.retryStrategy?.maxAttempts || this.DEFAULTS.RETRY_ATTEMPTS,
         retryStrategy: options.retryStrategy || {
-          maxAttempts: 3,
+          maxAttempts: this.DEFAULTS.RETRY_ATTEMPTS,
           backoff: "exponential",
-          initialDelay: 1000,
+          initialDelay: this.DEFAULTS.RETRY_DELAY,
         },
-        timeout: options.timeout || 300000,
+        timeout: options.timeout || this.DEFAULTS.JOB_TIMEOUT,
         tags: options.tags || [],
         createdAt: new Date(),
         scheduledFor: options.scheduledFor || new Date(),
@@ -100,76 +146,148 @@ export class JobScheduler {
         progress: 0,
       };
 
-      const pipeline = this.redis.pipeline();
-
-      if (options.scheduledFor) {
-        pipeline.zadd(this.SCHEDULED_JOBS_KEY, {
-          score: options.scheduledFor.getTime(),
-          member: JSON.stringify(job),
-        });
-      } else {
-        pipeline.zadd(this.JOBS_KEY, {
-          score: this.calculatePriorityScore(job),
-          member: JSON.stringify(job),
-        });
-      }
-
-      // Index job by tags for easier querying
-      if ((job as Job & { tags: string[] }).tags.length > 0) {
-        for (const tag of job.tags) {
-          pipeline.sadd(`jobs:tag:${tag}`, job.id);
-        }
-      }
-
-      await pipeline.exec();
-      this.logger.info("Job scheduled", {
-        jobId: job.id,
-        type,
-        tags: job.tags,
-      });
+      await this.saveJob(job, options.scheduledFor);
+      await this.updateMetrics("scheduled", job);
 
       return job.id;
     } catch (error) {
-      this.logger.error("Error scheduling job:", error);
+      this.logger.error("Failed to schedule job:", {
+        type,
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
       throw error;
     }
   }
 
+  private async saveJob(
+    job: Job<TaskPayload>,
+    scheduledFor?: Date
+  ): Promise<void> {
+    const pipeline = this.redis.pipeline();
+
+    // Save to appropriate queue
+    if (scheduledFor) {
+      pipeline.zadd(this.KEYS.SCHEDULED, {
+        score: scheduledFor.getTime(),
+        member: JSON.stringify(job),
+      });
+    } else {
+      pipeline.zadd(this.KEYS.QUEUE, {
+        score: this.calculatePriorityScore(job),
+        member: JSON.stringify(job),
+      });
+    }
+
+    // Index by tags
+    if (job.tags.length > 0) {
+      for (const tag of job.tags) {
+        pipeline.sadd(`${this.KEYS.TAGS}:${tag}`, job.id);
+      }
+    }
+
+    // Save job details
+    pipeline.set(`job:${job.id}`, JSON.stringify(job));
+
+    await pipeline.exec();
+
+    this.logger.info("Job saved successfully", {
+      jobId: job.id,
+      type: job.type,
+      tags: job.tags,
+    });
+  }
+
   async getJobStatus(jobId: string): Promise<JobResult | null> {
-    return this.redis.get(`${this.JOB_RESULTS_KEY}:${jobId}`);
+    try {
+      const result = await this.redis.get(`${this.KEYS.RESULTS}:${jobId}`);
+      return result ? JSON.parse(result as string) : null;
+    } catch (error) {
+      this.logger.error("Failed to get job status:", {
+        jobId,
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+      return null;
+    }
   }
 
   async updateJobProgress(jobId: string, progress: number): Promise<void> {
-    const job = await this.getJobById(jobId);
-    if (job) {
-      job.progress = progress;
-      await this.redis.set(`job:${jobId}`, JSON.stringify(job));
+    try {
+      const job = await this.getJobById(jobId);
+      if (job) {
+        job.progress = Math.min(Math.max(progress, 0), 100); // Ensure progress is between 0-100
+        await this.redis.set(`job:${jobId}`, JSON.stringify(job));
+        await this.updateMetrics("progress", job);
+      }
+    } catch (error) {
+      this.logger.error("Failed to update job progress:", {
+        jobId,
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
     }
   }
 
   async retryJob(jobId: string): Promise<boolean> {
-    const job = await this.getJobById(jobId);
-    if (!job) return false;
+    try {
+      const job = await this.getJobById(jobId);
+      if (!job) return false;
 
-    const retryDelay = this.calculateRetryDelay(job);
-    if (retryDelay === null) {
-      await this.moveToDeadLetterQueue(job);
+      const retryDelay = this.calculateRetryDelay(job);
+      if (retryDelay === null) {
+        await this.moveToDeadLetterQueue(job);
+        return false;
+      }
+
+      job.scheduledFor = new Date(Date.now() + retryDelay);
+      job.attempts += 1;
+      job.status = JobStatus.SCHEDULED;
+
+      await this.saveJob(job, job.scheduledFor);
+      await this.updateMetrics("retry", job);
+
+      return true;
+    } catch (error) {
+      this.logger.error("Failed to retry job:", {
+        jobId,
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
       return false;
     }
-
-    job.scheduledFor = new Date(Date.now() + retryDelay);
-    job.attempts += 1;
-    job.status = JobStatus.SCHEDULED;
-
-    await this.redis.zadd(this.SCHEDULED_JOBS_KEY, {
-      score: job.scheduledFor.getTime(),
-      member: JSON.stringify(job),
-    });
-
-    return true;
   }
 
-  private calculateRetryDelay(job: Job): number | null {
+  private async updateMetrics(
+    event:
+      | "scheduled"
+      | "started"
+      | "completed"
+      | "failed"
+      | "retry"
+      | "progress",
+    job: Job<TaskPayload>
+  ): Promise<void> {
+    try {
+      const metrics = {
+        event,
+        jobId: job.id,
+        type: job.type,
+        timestamp: Date.now(),
+        attempts: job.attempts,
+        progress: job.progress,
+      };
+
+      await this.redis.zadd(this.KEYS.METRICS, {
+        score: Date.now(),
+        member: JSON.stringify(metrics),
+      });
+    } catch (error) {
+      this.logger.error("Failed to update metrics:", {
+        event,
+        jobId: job.id,
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  }
+
+  private calculateRetryDelay(job: Job<TaskPayload>): number | null {
     if (!job.retryStrategy || job.attempts >= job.retryStrategy.maxAttempts) {
       return null;
     }
@@ -181,9 +299,9 @@ export class JobScheduler {
     return initialDelay * (job.attempts + 1);
   }
 
-  private async moveToDeadLetterQueue(job: Job): Promise<void> {
+  private async moveToDeadLetterQueue(job: Job<TaskPayload>): Promise<void> {
     job.status = JobStatus.FAILED;
-    await this.redis.zadd(this.DEAD_LETTER_QUEUE, {
+    await this.redis.zadd(this.KEYS.DLQ, {
       score: Date.now(),
       member: JSON.stringify(job),
     });
@@ -193,9 +311,9 @@ export class JobScheduler {
     });
   }
 
-  async getJobsByTag(tag: string): Promise<Job[]> {
+  async getJobsByTag(tag: string): Promise<Job<TaskPayload>[]> {
     const jobIds = await this.redis.smembers(`jobs:tag:${tag}`);
-    const jobs: Job[] = [];
+    const jobs: Job<TaskPayload>[] = [];
 
     for (const jobId of jobIds) {
       const job = await this.getJobById(jobId);
@@ -205,20 +323,20 @@ export class JobScheduler {
     return jobs;
   }
 
-  private async getJobById(jobId: string): Promise<Job | null> {
+  private async getJobById(jobId: string): Promise<Job<TaskPayload> | null> {
     const jobStr = await this.redis.get(`job:${jobId}`);
     return jobStr ? JSON.parse(jobStr as string) : null;
   }
 
-  async getNextJob(): Promise<Job | null> {
+  async getNextJob(): Promise<Job<TaskPayload> | null> {
     try {
       await this.moveScheduledJobs();
 
-      const result = await this.redis.zpopmin(this.JOBS_KEY);
+      const result = await this.redis.zpopmin(this.KEYS.QUEUE);
       if (!result || !result[0]) return null;
 
       const [member] = result;
-      const job: Job = JSON.parse(member as string);
+      const job: Job<TaskPayload> = JSON.parse(member as string);
       job.status = JobStatus.RUNNING;
       job.startedAt = new Date();
 
@@ -234,7 +352,7 @@ export class JobScheduler {
 
   private async moveScheduledJobs(): Promise<void> {
     const now = Date.now();
-    const dueJobs = await this.redis.zrange(this.SCHEDULED_JOBS_KEY, 0, now, {
+    const dueJobs = await this.redis.zrange(this.KEYS.SCHEDULED, 0, now, {
       byScore: true,
     });
 
@@ -243,11 +361,11 @@ export class JobScheduler {
     const pipeline = this.redis.pipeline();
 
     for (const jobStr of dueJobs) {
-      const job: Job = JSON.parse(jobStr as string);
+      const job: Job<TaskPayload> = JSON.parse(jobStr as string);
       job.status = JobStatus.PENDING;
 
-      pipeline.zrem(this.SCHEDULED_JOBS_KEY, jobStr);
-      pipeline.zadd(this.JOBS_KEY, {
+      pipeline.zrem(this.KEYS.SCHEDULED, jobStr);
+      pipeline.zadd(this.KEYS.QUEUE, {
         score: this.calculatePriorityScore(job),
         member: JSON.stringify(job),
       });
@@ -256,7 +374,7 @@ export class JobScheduler {
     await pipeline.exec();
   }
 
-  private calculatePriorityScore(job: Job): number {
+  private calculatePriorityScore(job: Job<TaskPayload>): number {
     const now = Date.now();
     const priorityWeight = {
       [JobPriority.HIGH]: 1000000,
@@ -269,7 +387,7 @@ export class JobScheduler {
 
   private async setJobLock(jobId: string): Promise<boolean> {
     return (
-      (await this.redis.set(`${this.JOB_LOCKS_KEY}:${jobId}`, "1", {
+      (await this.redis.set(`${this.KEYS.LOCKS}:${jobId}`, "1", {
         nx: true,
         ex: 300, // 5 minute lock
       })) !== null

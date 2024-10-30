@@ -9,7 +9,7 @@ import type {
 } from "@/types/common";
 import type { EmailDocument } from "@/types/email";
 import { Logger } from "@/utils/logger";
-import { EmailStatus } from "@/types/email";
+import { EmailPriority } from "@/types/email";
 
 export class EmailHandler {
   private repository: EmailRepository;
@@ -116,7 +116,7 @@ export class EmailHandler {
         subject: body.subject,
         textContent: body.content,
         status: "unread",
-        priority: "normal",
+        priority: EmailPriority.Normal,
         category: [],
         labels: [],
         spam: false,
@@ -126,6 +126,7 @@ export class EmailHandler {
         from: "your-default-sender@example.com",
         receivedAt: new Date(),
         spamScore: 0,
+        tags: [],
       });
 
       return c.json({

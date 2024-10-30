@@ -1,6 +1,6 @@
 import { EmailDocument } from "@/types/email";
 import { ThreadDocument } from "@/db/models/thread";
-import { ThreadRepository } from "@/db/repositories/thread";
+import { ThreadRepository } from "@/db/models/repositories/thread";
 import { Logger } from "@/utils/logger";
 
 export class ThreadService {

@@ -35,4 +35,7 @@ export const constants = {
     jwtExpiresIn: "24h",
     bcryptRounds: 10,
   },
+  r2: {
+    accountId: process.env.R2_ACCOUNT_ID || "",
+  },
 };

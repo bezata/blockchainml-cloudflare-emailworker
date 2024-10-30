@@ -1,5 +1,5 @@
 import { swaggerUI } from "@hono/swagger-ui";
-import { OpenAPIHono } from "@hono/zod-openapi";
+import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import { logger } from "hono/logger";
 import { prettyJSON } from "hono/pretty-json";
 import { cors } from "hono/cors";
@@ -14,7 +14,8 @@ import { queueRoutes } from "./api/routes/queue";
 import { authMiddleware } from "@/api/middlewares/auth";
 import { rateLimitMiddleware } from "@/api/middlewares/rateLimit";
 import { errorMiddleware } from "@/api/middlewares/error";
-import type { Env } from "@/types/env";
+import { QueueManager, WorkerEnv } from "./services/storage/queue";
+import { StatusCode } from "hono/utils/http-status";
 
 // OpenAPI Specification
 const openApiSpec = {
@@ -143,7 +144,13 @@ const openApiSpec = {
 };
 
 // Create OpenAPI app instance
-const app = new OpenAPIHono<{ Bindings: Env }>();
+const app = new OpenAPIHono<AppBindings>();
+const queueManager = new QueueManager({
+  UPSTASH_REDIS_REST_URL: process.env.UPSTASH_REDIS_REST_URL!,
+  UPSTASH_REDIS_REST_TOKEN: process.env.UPSTASH_REDIS_REST_TOKEN!,
+  EMAIL_DOMAIN: process.env.EMAIL_DOMAIN!,
+  DEFAULT_FROM_EMAIL: process.env.DEFAULT_FROM_EMAIL!,
+} as WorkerEnv);
 
 // Global Middlewares
 app.use("*", logger());
@@ -169,9 +176,20 @@ app.use(
 app.get(
   "/docs",
   swaggerUI({
-    url: "/api-docs",
-    title: "BlockchainML Email Worker API",
-    theme: "dark",
+    urls: [
+      {
+        url: "/api-docs",
+        name: "Current Environment",
+      },
+      {
+        url: "https://api.blockchainml.com/api-docs",
+        name: "Production",
+      },
+      {
+        url: "https://staging-api.blockchainml.com/api-docs",
+        name: "Staging",
+      },
+    ],
   })
 );
 
@@ -181,78 +199,104 @@ app.get(
     cacheName: "api-docs",
     cacheControl: "public, max-age=86400",
   }),
-  (c) => {
-    return c.json(openApiSpec);
-  }
+  (c) => c.json(openApiSpec)
 );
 
+// Health check route schema
+const healthCheckSchema = z.object({
+  status: z.enum(["healthy", "degraded", "unhealthy"]),
+  version: z.string(),
+  timestamp: z.string().datetime(),
+  uptime: z.number(),
+  metrics: z.object({
+    memory: z.object({
+      usage: z.record(z.number()),
+      heapLimit: z.number(),
+    }),
+    cpu: z.object({
+      usage: z.record(z.number()),
+      loadAvg: z.number(),
+    }),
+    queue: z.object({
+      pending: z.number(),
+    }),
+  }),
+});
+
 // Health check endpoint
-app.openapi(
-  {
-    tags: ["system"],
-    summary: "System health check",
-    description: "Returns the current status and health metrics of the API",
-    responses: {
-      200: {
-        description: "System health information",
-        content: {
-          "application/json": {
-            schema: {
-              type: "object",
-              properties: {
-                status: { type: "string" },
-                version: { type: "string" },
-                timestamp: { type: "string", format: "date-time" },
-                uptime: { type: "number" },
-                metrics: {
-                  type: "object",
-                  properties: {
-                    memory: { type: "object" },
-                    cpu: { type: "object" },
-                    queue: { type: "object" },
-                  },
-                },
-              },
-            },
-          },
+const healthCheckRoute = createRoute({
+  method: "get",
+  path: "/health",
+  tags: ["system"],
+  summary: "System health check",
+  description: "Returns the current status and health metrics of the API",
+  responses: {
+    200: {
+      description: "System health information",
+      content: {
+        "application/json": {
+          schema: healthCheckSchema,
         },
       },
     },
   },
-  "/health",
-  async (c) => {
-    const metrics = await getSystemMetrics();
-    return c.json({
-      status: "healthy",
-      version: config.app.version,
-      timestamp: new Date().toISOString(),
-      uptime: process.uptime(),
-      metrics,
-    });
-  }
-);
+});
 
-// API Routes
-const api = app.openapi(
-  {
-    info: {
-      title: "BlockchainML Email Worker API",
-      version: config.app.version,
+app.openapi(healthCheckRoute, async (c) => {
+  const metrics = await getSystemMetrics();
+  return c.json({
+    status: "healthy" as const,
+    version: config.app.version,
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    metrics,
+  });
+});
+
+// API Routes with OpenAPI config
+const apiRoute = createRoute({
+  method: "get",
+  path: "/api/v1",
+  security: [{ bearerAuth: [] }, { apiKey: [] }],
+  responses: {
+    200: {
+      description: "API root endpoint",
+      content: {
+        "application/json": {
+          schema: z.object({
+            message: z.string(),
+          }),
+        },
+      },
     },
-    security: [{ bearerAuth: [] }, { apiKey: [] }],
   },
-  "/api/v1"
-);
+});
+
+const api = app.openapi(apiRoute, (c) => {
+  return c.json({ message: "API root endpoint" });
+});
 
 // Apply rate limiting to API routes
 api.use("*", rateLimitMiddleware);
 api.use("*", authMiddleware);
 
-// Mount route handlers
-api.mount("/emails", emailRoutes);
-api.mount("/threads", threadRoutes);
-api.mount("/analytics", analyticsRoutes);
-api.mount("/queue", queueRoutes);
+// Mount route handlers with proper typing
+api.route("/emails", emailRoutes);
+api.route("/threads", threadRoutes);
+api.route("/analytics", analyticsRoutes);
+api.route("/queue", queueRoutes);
+
+// Custom error class
+class APIError extends Error {
+  constructor(
+    public status: number,
+    message: string,
+    public details?: unknown
+  ) {
+    super(message);
+    this.name = "APIError";
+  }
+}
 
 // Error handling
 app.onError((err, c) => {
@@ -263,22 +307,34 @@ app.onError((err, c) => {
     requestId: c.req.header("X-Request-ID"),
   });
 
-  const status = err.status || 500;
-  const message = status === 500 ? "Internal Server Error" : err.message;
+  if (err instanceof APIError) {
+    return c.json(
+      {
+        status: err.status,
+        message: err.message,
+        details: err.details,
+        requestId: c.req.header("X-Request-ID"),
+        timestamp: new Date().toISOString(),
+      },
+      err.status as StatusCode
+    );
+  }
 
   return c.json(
     {
-      status,
-      message,
+      status: 500,
+      message: "Internal Server Error",
       requestId: c.req.header("X-Request-ID"),
       timestamp: new Date().toISOString(),
     },
-    status
+    500
   );
 });
 
 // Helper function for health metrics
 async function getSystemMetrics() {
+  const pendingJobs = await queueManager.getQueueStats();
+
   return {
     memory: {
       usage: process.memoryUsage(),
@@ -289,9 +345,21 @@ async function getSystemMetrics() {
       loadAvg: 0, // Workers don't have access to this
     },
     queue: {
-      pending: await getQueueMetrics(),
+      pending: pendingJobs.pending,
     },
   };
 }
 
+export type AppType = typeof app;
 export default app;
+
+// Add this type definition
+type AppBindings = {
+  Bindings: {
+    MONGODB_URI: string;
+    JWT_SECRET: string;
+    EMAIL_QUEUE: string;
+    API_KEY: string;
+    ENVIRONMENT: string;
+  };
+};

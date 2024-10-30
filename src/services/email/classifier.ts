@@ -1,4 +1,4 @@
-import { EmailDocument, EmailPriority, EmailCategory } from "@/types/email";
+import { EmailCategory, EmailPriority, EmailDocument } from "@/types/email";
 
 export class EmailClassifier {
   private readonly priorityPatterns = {
@@ -7,10 +7,15 @@ export class EmailClassifier {
   };
 
   private readonly categoryPatterns: Record<EmailCategory, RegExp[]> = {
-    business: [/invoice/i, /contract/i, /proposal/i, /meeting/i],
-    personal: [/family/i, /friend/i, /personal/i],
-    marketing: [/offer/i, /discount/i, /sale/i, /promotion/i],
-    social: [/social/i, /network/i, /connection/i, /linkedin/i],
+    [EmailCategory.Business]: [
+      /invoice/i,
+      /contract/i,
+      /proposal/i,
+      /meeting/i,
+    ],
+    [EmailCategory.Personal]: [/family/i, /friend/i, /personal/i],
+    [EmailCategory.Marketing]: [/offer/i, /discount/i, /sale/i, /promotion/i],
+    [EmailCategory.Social]: [/social/i, /network/i, /connection/i, /linkedin/i],
   };
 
   private readonly spamPatterns = [
@@ -23,8 +28,13 @@ export class EmailClassifier {
     /nigerian prince/i,
   ];
 
-  public classify(email: Partial<EmailDocument>) {
-    const content = `${email.subject} ${email.textContent}`.toLowerCase();
+  public classify(email: Partial<EmailDocument>): {
+    priority: EmailPriority;
+    categories: EmailCategory[];
+    spamScore: number;
+  } {
+    const content =
+      `${email.subject || ""} ${email.textContent || ""}`.toLowerCase();
 
     return {
       priority: this.detectPriority(content),
@@ -35,12 +45,12 @@ export class EmailClassifier {
 
   private detectPriority(content: string): EmailPriority {
     if (this.priorityPatterns.high.some((pattern) => pattern.test(content))) {
-      return "high";
+      return EmailPriority.High;
     }
     if (this.priorityPatterns.low.some((pattern) => pattern.test(content))) {
-      return "low";
+      return EmailPriority.Low;
     }
-    return "normal";
+    return EmailPriority.Normal;
   }
 
   private detectCategories(content: string): EmailCategory[] {
@@ -52,12 +62,102 @@ export class EmailClassifier {
   }
 
   private calculateSpamScore(content: string): number {
-    let score = 0;
-    this.spamPatterns.forEach((pattern) => {
-      if (pattern.test(content)) {
-        score += 0.2;
+    const baseScore = this.spamPatterns.reduce((score, pattern) => {
+      return pattern.test(content) ? score + 0.2 : score;
+    }, 0);
+
+    return Math.min(baseScore, 1);
+  }
+
+  public async classifyWithML(email: Partial<EmailDocument>): Promise<{
+    priority: EmailPriority;
+    categories: EmailCategory[];
+    spamScore: number;
+    confidence: number;
+  }> {
+    const basicResults = this.classify(email);
+    const enhancedResults = await this.enhanceClassification(
+      email,
+      basicResults
+    );
+
+    return {
+      ...enhancedResults,
+      confidence: this.calculateConfidence(enhancedResults),
+    };
+  }
+
+  private async enhanceClassification(
+    email: Partial<EmailDocument>,
+    basicResults: {
+      priority: EmailPriority;
+      categories: EmailCategory[];
+      spamScore: number;
+    }
+  ) {
+    // ML-based enhancements would go here
+    return basicResults;
+  }
+
+  private calculateConfidence(results: {
+    priority: EmailPriority;
+    categories: EmailCategory[];
+    spamScore: number;
+  }): number {
+    const categoryConfidence = results.categories.length > 0 ? 0.5 : 0.3;
+    const spamConfidence = results.spamScore > 0.8 ? 0.9 : 0.5;
+    const priorityConfidence =
+      results.priority !== EmailPriority.Normal ? 0.8 : 0.4;
+
+    return (categoryConfidence + spamConfidence + priorityConfidence) / 3;
+  }
+
+  public updatePatterns(newPatterns: {
+    priority?: {
+      high: RegExp[];
+      low: RegExp[];
+    };
+    category?: Record<EmailCategory, RegExp[]>;
+    spam?: RegExp[];
+  }): void {
+    if (newPatterns.priority) {
+      this.validatePriorityPatterns(newPatterns.priority);
+      Object.assign(this.priorityPatterns, newPatterns.priority);
+    }
+
+    if (newPatterns.category) {
+      this.validateCategoryPatterns(newPatterns.category);
+      Object.assign(this.categoryPatterns, newPatterns.category);
+    }
+
+    if (newPatterns.spam) {
+      this.validateSpamPatterns(newPatterns.spam);
+      this.spamPatterns.push(...newPatterns.spam);
+    }
+  }
+
+  private validatePriorityPatterns(patterns: {
+    high: RegExp[];
+    low: RegExp[];
+  }): void {
+    if (!patterns.high?.length || !patterns.low?.length) {
+      throw new Error("Invalid priority patterns structure");
+    }
+  }
+
+  private validateCategoryPatterns(
+    patterns: Record<EmailCategory, RegExp[]>
+  ): void {
+    for (const category of Object.values(EmailCategory)) {
+      if (!patterns[category]?.length) {
+        throw new Error(`Missing patterns for category: ${category}`);
       }
-    });
-    return Math.min(score, 1);
+    }
+  }
+
+  private validateSpamPatterns(patterns: RegExp[]): void {
+    if (!Array.isArray(patterns) || !patterns.length) {
+      throw new Error("Spam patterns must be a non-empty array");
+    }
   }
 }

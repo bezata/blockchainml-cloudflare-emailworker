@@ -25,8 +25,37 @@ export enum TaskType {
 }
 
 export interface BaseTaskPayload {
-  correlationId?: string;
+  correlationId: string;
   timestamp: number;
+}
+
+export interface QueueTask<T extends BaseTaskPayload = TaskPayload> {
+  id: string;
+  type: TaskType;
+  payload: T;
+  priority: TaskPriority;
+  status: TaskStatus;
+  attempts: number;
+  maxAttempts: number;
+  createdAt: Date;
+  scheduledFor: Date;
+  metadata: Record<string, unknown>;
+  lastAttemptAt?: Date;
+  completedAt?: Date;
+  error?: string;
+}
+
+export interface EmailMessage {
+  id: string;
+  from: string;
+  to: string[];
+  subject: string;
+  content: string;
+  headers: Record<string, string>;
+  raw: {
+    text: string;
+    html?: string;
+  };
 }
 
 export interface EmailTaskPayload extends BaseTaskPayload {
@@ -68,6 +97,7 @@ export interface UpdateThreadPayload extends BaseTaskPayload {
 }
 
 export interface NotificationPayload extends BaseTaskPayload {
+  type: string;
   userId: string;
   notification: {
     type: "email" | "push" | "sms" | "in_app";
@@ -79,54 +109,28 @@ export interface NotificationPayload extends BaseTaskPayload {
   };
 }
 
-export type TaskPayload =
-  | EmailTaskPayload
-  | AttachmentTaskPayload
-  | AnalyticsTaskPayload
-  | UpdateThreadPayload
-  | NotificationPayload;
-
-export interface QueueTask<T extends TaskPayload = TaskPayload> {
-  id: string;
-  type: TaskType;
-  payload: T;
-  priority: TaskPriority;
-  status: TaskStatus;
-  attempts: number;
-  maxAttempts: number;
-  lastAttemptAt?: Date;
-  error?: string;
-  createdAt: Date;
-  scheduledFor: Date;
-  completedAt?: Date;
-  metadata?: Record<string, unknown>;
-}
-
 export interface SendEmailPayload extends BaseTaskPayload {
   to: string[];
   cc?: string[];
   bcc?: string[];
+  from?: string;
   subject: string;
   content: {
-    text?: string;
+    text: string;
     html?: string;
   };
-  attachments?: Array<{
+  attachments?: {
+    id: string;
     filename: string;
     content: string;
     contentType: string;
-  }>;
-  metadata?: {
-    templateId?: string;
-    campaignId?: string;
-    customHeaders?: Record<string, string>;
-  };
+    size: number;
+  }[];
+  metadata?: Record<string, unknown>;
 }
 
 export interface CleanupStoragePayload extends BaseTaskPayload {
   olderThan: Date;
-  types?: Array<"attachments" | "analytics" | "logs">;
-  excludePatterns?: string[];
   dryRun?: boolean;
 }
 
@@ -140,4 +144,70 @@ export interface IndexSearchPayload extends BaseTaskPayload {
     language?: string;
     boost?: Record<string, number>;
   };
+}
+
+export type TaskPayload =
+  | EmailTaskPayload
+  | AttachmentTaskPayload
+  | AnalyticsTaskPayload
+  | UpdateThreadPayload
+  | NotificationPayload
+  | SendEmailPayload
+  | CleanupStoragePayload
+  | IndexSearchPayload;
+
+export interface SendEmailPayload extends BaseTaskPayload {
+  to: string[];
+  cc?: string[];
+  bcc?: string[];
+  from?: string;
+  subject: string;
+  content: {
+    text: string;
+    html?: string;
+  };
+  attachments?: {
+    id: string;
+    filename: string;
+    content: string;
+    contentType: string;
+    size: number;
+  }[];
+  metadata?: Record<string, unknown>;
+}
+
+// Add missing payload types
+export interface IndexSearchPayload extends BaseTaskPayload {
+  documentId: string;
+  content: {
+    text: string;
+    metadata: Record<string, unknown>;
+  };
+  options?: {
+    language?: string;
+    boost?: Record<string, number>;
+  };
+}
+
+export interface UpdateThreadPayload extends BaseTaskPayload {
+  threadId: string;
+  updates: {
+    status?: string;
+    labels?: string[];
+    metadata?: Record<string, unknown>;
+  };
+  reindex?: boolean;
+}
+
+// Update KV list types
+export interface KVNamespaceListOptions {
+  prefix?: string;
+  cursor?: string | null;
+  limit?: number;
+}
+
+export interface KVNamespaceListResult<K> {
+  keys: KVNamespaceListKey<K>[];
+  list_complete: boolean;
+  cursor?: string;
 }

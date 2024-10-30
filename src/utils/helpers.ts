@@ -28,6 +28,44 @@ export class Helpers {
   }
 
   /**
+   * Calculate the approximate memory size of an object in bytes
+   * @param obj Object to calculate size for
+   * @returns Approximate size in bytes
+   */
+  static getObjectSize(obj: any): number {
+    const objectList = new WeakSet();
+
+    const sizeOf = (value: any): number => {
+      if (value === null) return 0;
+
+      const type = typeof value;
+      if (type === "boolean") return 4;
+      if (type === "number") return 8;
+      if (type === "string") return value.length * 2;
+      if (type === "undefined") return 0;
+
+      // Avoid circular references
+      if (typeof value === "object") {
+        if (objectList.has(value)) return 0;
+        objectList.add(value);
+
+        const keys = Object.keys(value);
+        let size = 0;
+
+        for (const key of keys) {
+          size += sizeOf(key);
+          size += sizeOf(value[key]);
+        }
+
+        return size;
+      }
+
+      return 0;
+    };
+
+    return sizeOf(obj);
+  }
+  /**
    * Generate a unique ID with custom alphabet
    * @param length Length of the ID
    * @param alphabet Custom alphabet to use
@@ -63,20 +101,20 @@ export class Helpers {
     maxAttempts: number = 3,
     baseDelay: number = 1000
   ): Promise<T> {
-    let lastError: Error;
+    let lastError: Error | undefined;
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
         return await fn();
       } catch (error) {
-        lastError = error;
+        lastError = error as Error;
         if (attempt < maxAttempts - 1) {
           await this.sleepWithBackoff(attempt, baseDelay);
         }
       }
     }
 
-    throw lastError;
+    throw lastError as Error;
   }
 
   /**
@@ -259,12 +297,15 @@ export class Helpers {
    * @param key Key to group by
    */
   static groupBy<T>(array: T[], key: keyof T): Record<string, T[]> {
-    return array.reduce((groups, item) => {
-      const group = item[key]?.toString() ?? "";
-      groups[group] = groups[group] ?? [];
-      groups[group].push(item);
-      return groups;
-    }, {} as Record<string, T[]>);
+    return array.reduce(
+      (groups, item) => {
+        const group = item[key]?.toString() ?? "";
+        groups[group] = groups[group] ?? [];
+        groups[group].push(item);
+        return groups;
+      },
+      {} as Record<string, T[]>
+    );
   }
 
   /**
@@ -276,12 +317,15 @@ export class Helpers {
     obj: T,
     keys: K[]
   ): Pick<T, K> {
-    return keys.reduce((result, key) => {
-      if (obj.hasOwnProperty(key)) {
-        result[key] = obj[key];
-      }
-      return result;
-    }, {} as Pick<T, K>);
+    return keys.reduce(
+      (result, key) => {
+        if (obj.hasOwnProperty(key)) {
+          result[key] = obj[key];
+        }
+        return result;
+      },
+      {} as Pick<T, K>
+    );
   }
 
   /**

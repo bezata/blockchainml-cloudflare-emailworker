@@ -1,6 +1,5 @@
 import { Context, Next } from "hono";
 import { z } from "zod";
-import { Validator } from "../../utils/validation";
 
 export const emailSchema = z.object({
   from: z.string().email(),
@@ -18,7 +17,7 @@ export async function validateEmail(c: Context, next: Next) {
     const body = await c.req.json();
     const validatedData = emailSchema.parse(body);
     c.set("validatedData", validatedData);
-    await next();
+    return await next();
   } catch (error) {
     if (error instanceof z.ZodError) {
       return c.json(

@@ -1,6 +1,5 @@
 import { Redis } from "@upstash/redis";
 import { Logger } from "../utils/logger";
-import { env } from "hono/adapter";
 
 export interface Metric {
   name: string;
@@ -25,8 +24,8 @@ export class MetricsCollector {
 
   constructor() {
     this.redis = new Redis({
-      url: env.UPSTASH_REDIS_REST_URL,
-      token: env.UPSTASH_REDIS_REST_TOKEN,
+      url: process.env.UPSTASH_REDIS_REST_URL!,
+      token: process.env.UPSTASH_REDIS_REST_TOKEN!,
     });
     this.logger = Logger.getInstance("production");
   }

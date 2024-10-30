@@ -1,8 +1,9 @@
 import { Redis } from "@upstash/redis";
 import { Logger } from "../../utils/logger";
 import { SearchIndexer } from "./indexer";
-import { env } from "../../config/env";
+
 import { Helpers } from "../../utils/helpers";
+import { StorageStats } from "@/monitoring/alerts";
 
 interface IndexStats {
   totalTerms: number;
@@ -24,10 +25,21 @@ interface IndexStats {
   };
 }
 
+interface ZRangeEntry {
+  member: string;
+  score: number;
+}
+
+// Add missing properties to SearchIndexer
+interface SearchIndexerExtended extends SearchIndexer {
+  INVERTED_INDEX_PREFIX: string;
+  METADATA_PREFIX: string;
+}
+
 export class SearchOptimizer {
   private readonly redis: Redis;
   private readonly logger: Logger;
-  private readonly indexer: SearchIndexer;
+  private readonly indexer: SearchIndexerExtended;
   private readonly BATCH_SIZE = 1000;
   private readonly OPTIMIZATION_LOCK = "search:optimization:lock";
   private readonly STATS_CACHE_KEY = "search:stats";
@@ -35,11 +47,11 @@ export class SearchOptimizer {
 
   constructor() {
     this.redis = new Redis({
-      url: env.UPSTASH_REDIS_REST_URL,
-      token: env.UPSTASH_REDIS_REST_TOKEN,
+      url: process.env.UPSTASH_REDIS_REST_URL!,
+      token: process.env.UPSTASH_REDIS_REST_TOKEN!,
     });
     this.logger = Logger.getInstance("production");
-    this.indexer = new SearchIndexer();
+    this.indexer = new SearchIndexer() as SearchIndexerExtended;
   }
 
   async optimizeIndex(): Promise<void> {
@@ -102,11 +114,11 @@ export class SearchOptimizer {
       do {
         // Scan instead of keys for better performance
         const [nextCursor, keys] = await this.redis.scan(cursor, {
-          match: `${this.indexer["INVERTED_INDEX_PREFIX"]}*`,
+          match: `${this.indexer.INVERTED_INDEX_PREFIX}*`,
           count: this.BATCH_SIZE,
         });
 
-        cursor = parseInt(nextCursor);
+        cursor = parseInt(nextCursor as string);
 
         // Process keys in batches
         const batches = Helpers.chunk(keys, 100);
@@ -146,11 +158,11 @@ export class SearchOptimizer {
     try {
       do {
         const [nextCursor, keys] = await this.redis.scan(cursor, {
-          match: `${this.indexer["INVERTED_INDEX_PREFIX"]}*`,
+          match: `${this.indexer.INVERTED_INDEX_PREFIX}*`,
           count: this.BATCH_SIZE,
         });
 
-        cursor = parseInt(nextCursor);
+        cursor = parseInt(nextCursor as string);
 
         // Process in batches
         const batches = Helpers.chunk(keys, 50);
@@ -160,9 +172,9 @@ export class SearchOptimizer {
               if (processedTerms.has(key)) return;
 
               const pipeline = this.redis.pipeline();
-              const entries = await this.redis.zrange(key, 0, -1, {
+              const entries = (await this.redis.zrange(key, 0, -1, {
                 withScores: true,
-              });
+              })) as unknown as ZRangeEntry[];
 
               if (entries.length === 0) return;
 
@@ -201,11 +213,11 @@ export class SearchOptimizer {
     try {
       do {
         const [nextCursor, keys] = await this.redis.scan(cursor, {
-          match: `${this.indexer["METADATA_PREFIX"]}*`,
+          match: `${this.indexer.METADATA_PREFIX}*`,
           count: this.BATCH_SIZE,
         });
 
-        cursor = parseInt(nextCursor);
+        cursor = parseInt(nextCursor as string);
 
         // Process in batches
         const batches = Helpers.chunk(keys, 50);
@@ -249,23 +261,26 @@ export class SearchOptimizer {
   private optimizeMetadataStructure(
     metadata: Record<string, any>
   ): Record<string, any> {
+    const cleaned: Record<string, any> = {};
+
     // Remove null or undefined values
-    const cleaned = Object.entries(metadata).reduce((acc, [key, value]) => {
+    for (const [key, value] of Object.entries(metadata)) {
       if (value != null) {
-        acc[key] = value;
+        cleaned[key] = value;
       }
-      return acc;
-    }, {});
+    }
 
     // Compress long string values if needed
-    return Object.entries(cleaned).reduce((acc, [key, value]) => {
+    const result: Record<string, any> = {};
+    for (const [key, value] of Object.entries(cleaned)) {
       if (typeof value === "string" && value.length > 1000) {
-        acc[key] = value.substring(0, 1000) + "...";
+        result[key] = value.substring(0, 1000) + "...";
       } else {
-        acc[key] = value;
+        result[key] = value;
       }
-      return acc;
-    }, {});
+    }
+
+    return result;
   }
 
   async analyzeIndexHealth(): Promise<IndexStats> {
@@ -273,24 +288,23 @@ export class SearchOptimizer {
       // Try to get cached stats first
       const cachedStats = await this.redis.get(this.STATS_CACHE_KEY);
       if (cachedStats) {
-        return JSON.parse(cachedStats);
+        return JSON.parse(cachedStats as string);
       }
 
       const startTime = Date.now();
       let totalTerms = 0;
       let totalDocuments = 0;
       const frequencies: number[] = [];
-      const issues: string[] = [];
 
       // Analyze term frequencies
       let cursor = 0;
       do {
         const [nextCursor, keys] = await this.redis.scan(cursor, {
-          match: `${this.indexer["INVERTED_INDEX_PREFIX"]}*`,
+          match: `${this.indexer.INVERTED_INDEX_PREFIX}*`,
           count: this.BATCH_SIZE,
         });
 
-        cursor = parseInt(nextCursor);
+        cursor = parseInt(nextCursor as string);
         totalTerms += keys.length;
 
         for (const key of keys) {
@@ -312,10 +326,10 @@ export class SearchOptimizer {
       // Calculate storage usage
       const storageUsage = {
         terms: await this.calculateStorageSize(
-          `${this.indexer["INVERTED_INDEX_PREFIX"]}*`
+          `${this.indexer.INVERTED_INDEX_PREFIX}*`
         ),
         metadata: await this.calculateStorageSize(
-          `${this.indexer["METADATA_PREFIX"]}*`
+          `${this.indexer.METADATA_PREFIX}*`
         ),
         total: 0,
       };
@@ -363,11 +377,45 @@ export class SearchOptimizer {
         count: this.BATCH_SIZE,
       });
 
-      cursor = parseInt(nextCursor);
+      cursor = parseInt(nextCursor as string);
 
       for (const key of keys) {
-        const memory = await this.redis.memory("usage", key);
-        total += memory || 0;
+        try {
+          // Estimate size based on the data itself
+          const type = await this.redis.type(key);
+
+          switch (type) {
+            case "string": {
+              const value = (await this.redis.get(key)) as string | null;
+              total += (value?.length || 0) + key.length;
+              break;
+            }
+            case "hash": {
+              const values = await this.redis.hgetall(key);
+              total += key.length + JSON.stringify(values).length;
+              break;
+            }
+            case "zset": {
+              const members = await this.redis.zrange(key, 0, -1, {
+                withScores: true,
+              });
+              total += key.length + JSON.stringify(members).length;
+              break;
+            }
+            case "set": {
+              const members = await this.redis.smembers(key);
+              total += key.length + JSON.stringify(members).length;
+              break;
+            }
+            case "list": {
+              const values = await this.redis.lrange(key, 0, -1);
+              total += key.length + JSON.stringify(values).length;
+              break;
+            }
+          }
+        } catch (error) {
+          this.logger.warn(`Failed to calculate size for key: ${key}`, error);
+        }
       }
     } while (cursor !== 0);
 
@@ -397,8 +445,8 @@ export class SearchOptimizer {
         issues.length === 0
           ? "healthy"
           : issues.length < 2
-          ? "degraded"
-          : "unhealthy",
+            ? "degraded"
+            : "unhealthy",
       issues,
     };
   }
@@ -408,5 +456,29 @@ export class SearchOptimizer {
     duration: number;
   }): Promise<void> {
     await this.redis.hset("search:optimization:stats", stats);
+  }
+
+  async getStorageStats(): Promise<StorageStats> {
+    try {
+      const totalSpace = 1024 * 1024 * 1024; // 1GB example limit
+      const usedSpace =
+        (await this.calculateStorageSize(
+          `${this.indexer.INVERTED_INDEX_PREFIX}*`
+        )) +
+        (await this.calculateStorageSize(`${this.indexer.METADATA_PREFIX}*`));
+      const availableSpace = totalSpace - usedSpace;
+      const utilizationPercent = (usedSpace / totalSpace) * 100;
+
+      return {
+        isHealthy: utilizationPercent < 90,
+        totalSpace,
+        usedSpace,
+        availableSpace,
+        utilizationPercent,
+      };
+    } catch (error) {
+      this.logger.error("Error getting storage stats:", error);
+      throw error;
+    }
   }
 }

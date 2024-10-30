@@ -1,5 +1,5 @@
 import { Helpers } from "../../utils/helpers";
-import { CacheEntry } from "./types";
+import { CacheConfig, CacheEntry, CacheStats } from "./types";
 
 export class MemoryCache {
   private readonly cache: Map<string, CacheEntry<any>>;
@@ -130,7 +130,7 @@ export class MemoryCache {
         return newestKey;
       }
       case "fifo": {
-        return this.cache.keys().next().value;
+        return this.cache.keys().next().value || null;
       }
       case "lfu": {
         let lowestCount = Infinity;
@@ -144,7 +144,7 @@ export class MemoryCache {
         return lowestKey;
       }
       default:
-        return this.cache.keys().next().value;
+        return this.cache.keys().next().value || null;
     }
   }
 
@@ -158,12 +158,6 @@ export class MemoryCache {
     this.stats.set(stat, (this.stats.get(stat) || 0) + value);
   }
 
-  private updateAccessTime(duration: number): void {
-    const current = this.stats.get("avgAccessTime") || 0;
-    const count = this.stats.get("hits") + this.stats.get("misses");
-    this.stats.set("avgAccessTime", (current * (count - 1) + duration) / count);
-  }
-
   getStats(): CacheStats {
     return {
       hits: this.stats.get("hits") || 0,
@@ -174,90 +168,3 @@ export class MemoryCache {
     };
   }
 }
-
-// src/services/cache/strategies.ts
-export class CacheStrategyManager {
-  private readonly redis: RedisCache;
-  private readonly memory: MemoryCache;
-  private readonly logger: Logger;
-
-  constructor(config: CacheConfig) {
-    this.redis = new RedisCache({
-      ...config,
-      namespace: `${config.namespace}:redis`,
-    });
-    this.memory = new MemoryCache({
-      ...config,
-      namespace: `${config.namespace}:memory`,
-    });
-    this.logger = Logger.getInstance("production");
-  }
-
-  async get<T>(key: string): Promise<T | null> {
-    // Try memory first
-    const memoryResult = this.memory.get<T>(key);
-    if (memoryResult !== null) {
-      return memoryResult;
-    }
-
-    // Try Redis
-    const redisResult = await this.redis.get<T>(key);
-    if (redisResult !== null) {
-      // Cache in memory for next time
-      this.memory.set(key, redisResult);
-      return redisResult;
-    }
-
-    return null;
-  }
-
-  async set<T>(key: string, value: T, ttl?: number): Promise<boolean> {
-    const [memorySuccess, redisSuccess] = await Promise.all([
-      this.memory.set(key, value, ttl),
-      this.redis.set(key, value, ttl),
-    ]);
-
-    return memorySuccess && redisSuccess;
-  }
-
-  async delete(key: string): Promise<boolean> {
-    const [memorySuccess, redisSuccess] = await Promise.all([
-      this.memory.delete(key),
-      this.redis.delete(key),
-    ]);
-
-    return memorySuccess || redisSuccess;
-  }
-
-  async clear(): Promise<void> {
-    await Promise.all([this.memory.clear(), this.redis.clear()]);
-  }
-
-  async getStats(): Promise<{ memory: CacheStats; redis: CacheStats }> {
-    const [memoryStats, redisStats] = await Promise.all([
-      this.memory.getStats(),
-      this.redis.getStats(),
-    ]);
-
-    return {
-      memory: memoryStats,
-      redis: redisStats,
-    };
-  }
-}
-
-// Example usage:
-const cacheManager = new CacheStrategyManager({
-  ttl: 3600000, // 1 hour
-  maxSize: 1000000, // 1MB
-  namespace: "app-cache",
-  strategy: "lru",
-});
-
-// Using the cache
-await cacheManager.set("user:123", userData);
-const cached = await cacheManager.get("user:123");
-
-// Get cache stats
-const stats = await cacheManager.getStats();
-console.log("Cache stats:", stats);

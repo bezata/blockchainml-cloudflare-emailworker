@@ -1,8 +1,18 @@
 import { ObjectId } from "mongodb";
 
-export type EmailPriority = "high" | "normal" | "low";
+export enum EmailPriority {
+  High = "HIGH",
+  Normal = "NORMAL",
+  Low = "LOW",
+}
+
 export type EmailStatus = "unread" | "read" | "archived" | "trash";
-export type EmailCategory = "business" | "personal" | "marketing" | "social";
+export enum EmailCategory {
+  Business = "BUSINESS",
+  Personal = "PERSONAL",
+  Marketing = "MARKETING",
+  Social = "SOCIAL",
+}
 export type EmailSendingStatus = "pending" | "sending" | "sent" | "failed";
 
 export interface EmailAttachment {
@@ -16,22 +26,25 @@ export interface EmailAttachment {
 export interface EmailDocument {
   _id: ObjectId;
   messageId: string;
-  threadId?: string;
+  threadId?: string | undefined;
   from: string;
   to: string[];
-  cc?: string[];
-  bcc?: string[];
+  cc?: string[] | undefined;
+  bcc?: string[] | undefined;
   subject: string;
-  headers?: {
-    "message-id"?: string;
-    references?: string;
-    "in-reply-to"?: string;
-    [key: string]: string | undefined;
-  };
-  textContent?: string;
-  htmlContent?: string;
-  attachments?: EmailAttachment[];
-  priority: EmailPriority;
+  tags: string[];
+  headers?:
+    | {
+        "message-id"?: string | undefined;
+        references?: string | undefined;
+        "in-reply-to"?: string | undefined;
+        [key: string]: string | undefined;
+      }
+    | undefined;
+  textContent?: string | undefined;
+  htmlContent?: string | undefined;
+  attachments?: EmailAttachment[] | undefined;
+  priority: (typeof EmailPriority)[keyof typeof EmailPriority];
   category: EmailCategory[];
   labels: string[];
   status: EmailStatus;
@@ -56,4 +69,26 @@ export interface BaseRepository<T> {
   create(data: Omit<T, "_id">): Promise<T>;
   update(id: string, update: Partial<T>): Promise<T | null>;
   delete(id: string): Promise<boolean>;
+}
+
+export interface ProcessEmailPayload {
+  messageId: string;
+  from: string;
+  to: string[];
+  cc?: string[];
+  bcc?: string[];
+  subject: string;
+  textContent?: string;
+  htmlContent?: string;
+  attachments?: EmailAttachment[];
+  headers?: {
+    "message-id"?: string;
+    references?: string;
+    "in-reply-to"?: string;
+    [key: string]: string | undefined;
+  };
+  priority?: (typeof EmailPriority)[keyof typeof EmailPriority];
+  receivedAt: Date;
+  spam?: boolean;
+  spamScore?: number;
 }

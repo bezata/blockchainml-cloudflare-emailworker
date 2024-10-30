@@ -1,23 +1,34 @@
 export interface SearchDocument {
   id: string;
-  type: "email" | "thread" | "attachment" | "document_chunk";
+  type: SearchDocumentType;
   content: string;
   metadata: Record<string, any>;
   vector?: number[];
   timestamp: Date;
 }
 
+export type SearchDocumentType =
+  | "email"
+  | "thread"
+  | "attachment"
+  | "document_chunk";
+
 export interface SearchOptions {
+  language?: string;
+  batchSize?: number;
+  skipVector?: boolean;
+  indexName?: string;
   from?: number;
   size?: number;
-  sort?: {
-    field: string;
-    order: "asc" | "desc";
-  };
   filters?: Record<string, any>;
   highlight?: boolean;
-  fields?: string[];
   fuzzy?: boolean;
+}
+
+export interface SearchStats {
+  documentsCount: number;
+  termsCount: number;
+  lastUpdated: Date;
 }
 
 export interface SearchResult {

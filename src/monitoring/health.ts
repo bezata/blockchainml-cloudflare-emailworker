@@ -6,9 +6,9 @@ import { Metric } from "./metrics";
 import { MongoDB } from "../config/mongodb";
 import { Logger } from "../utils/logger";
 import { Redis } from "@upstash/redis";
-import { env } from "hono/adapter";
+import { SearchOptimizer } from "@/services/search/optimizer";
 
-export interface HealthCheck {
+interface HealthCheck {
   name: string;
   status: "healthy" | "unhealthy" | "degraded";
   details?: Record<string, unknown>;
@@ -16,17 +16,35 @@ export interface HealthCheck {
   latency?: number;
 }
 
+interface DashboardData {
+  metrics: Record<string, MetricAggregation>;
+  alerts: Record<AlertSeverity, number>;
+  health: Record<string, HealthCheck>;
+  timestamp: number;
+}
+
+interface TimeRange {
+  start: number;
+  end: number;
+}
+
 export class HealthMonitor {
   private readonly redis: Redis;
   private readonly logger: Logger;
   private readonly HEALTH_KEY = "monitoring:health";
-
   private checks: Map<string, () => Promise<HealthCheck>> = new Map();
 
   constructor() {
+    if (
+      !process.env.UPSTASH_REDIS_REST_URL ||
+      !process.env.UPSTASH_REDIS_REST_TOKEN
+    ) {
+      throw new Error("Redis configuration is missing");
+    }
+
     this.redis = new Redis({
-      url: env.UPSTASH_REDIS_REST_URL,
-      token: env.UPSTASH_REDIS_REST_TOKEN,
+      url: process.env.UPSTASH_REDIS_REST_URL,
+      token: process.env.UPSTASH_REDIS_REST_TOKEN,
     });
     this.logger = Logger.getInstance("production");
 
@@ -68,7 +86,9 @@ export class HealthMonitor {
         results[name] = {
           name,
           status: "unhealthy",
-          details: { error: (error as Error).message },
+          details: {
+            error: error instanceof Error ? error.message : "Unknown error",
+          },
           lastChecked: Date.now(),
         };
       }
@@ -105,80 +125,248 @@ export class HealthMonitor {
       return {
         name: "mongodb",
         status: "unhealthy",
-        details: { error: (error as Error).message },
+        details: {
+          error: error instanceof Error ? error.message : "Unknown error",
+        },
         lastChecked: Date.now(),
       };
     }
   }
 
   private async checkQueue(): Promise<HealthCheck> {
-    // Implement queue health check
-    return {
-      name: "queue",
-      status: "healthy",
-      lastChecked: Date.now(),
-    };
+    try {
+      const queueStats = await this.getQueueStats();
+      return {
+        name: "queue",
+        status: queueStats.isHealthy ? "healthy" : "degraded",
+        details: queueStats,
+        lastChecked: Date.now(),
+      };
+    } catch (error) {
+      return {
+        name: "queue",
+        status: "unhealthy",
+        details: {
+          error: error instanceof Error ? error.message : "Unknown error",
+        },
+        lastChecked: Date.now(),
+      };
+    }
   }
 
   private async checkStorage(): Promise<HealthCheck> {
-    // Implement storage health check
+    try {
+      const storageStats = await this.getStorageStats();
+      return {
+        name: "storage",
+        status: storageStats.isHealthy ? "healthy" : "degraded",
+        details: storageStats,
+        lastChecked: Date.now(),
+      };
+    } catch (error) {
+      return {
+        name: "storage",
+        status: "unhealthy",
+        details: {
+          error: error instanceof Error ? error.message : "Unknown error",
+        },
+        lastChecked: Date.now(),
+      };
+    }
+  }
+
+  private async getQueueStats(): Promise<{
+    isHealthy: boolean;
+    [key: string]: any;
+  }> {
+    // Implement queue statistics collection
     return {
-      name: "storage",
-      status: "healthy",
-      lastChecked: Date.now(),
+      isHealthy: true,
+      pendingJobs: 0,
+      processingJobs: 0,
+      failedJobs: 0,
     };
+  }
+
+  private async getStorageStats(): Promise<{
+    isHealthy: boolean;
+    [key: string]: any;
+  }> {
+    try {
+      // Get database size using DBSIZE command
+      const dbSize = await this.redis.dbsize();
+
+      // Sample a few keys to estimate average memory usage
+      const sampleSize = Math.min(100, dbSize);
+      let totalSampleSize = 0;
+      let sampledKeys = 0;
+
+      if (sampleSize > 0) {
+        let cursor = 0;
+        do {
+          const [nextCursor, keys] = await this.redis.scan(cursor, {
+            count: Math.min(10, sampleSize - sampledKeys),
+          });
+
+          cursor = parseInt(nextCursor as string);
+
+          for (const key of keys) {
+            try {
+              // Get key size using STRLEN for strings or serialized size for other types
+              const type = await this.redis.type(key);
+              let size = 0;
+
+              switch (type) {
+                case "string": {
+                  const value = (await this.redis.get(key)) as string | null;
+                  size = (value?.length || 0) + key.length;
+                  break;
+                }
+                case "hash": {
+                  const value = await this.redis.hgetall(key);
+                  size = key.length + JSON.stringify(value).length;
+                  break;
+                }
+                case "zset": {
+                  const value = await this.redis.zrange(key, 0, -1, {
+                    withScores: true,
+                  });
+                  size = key.length + JSON.stringify(value).length;
+                  break;
+                }
+                case "set": {
+                  const value = await this.redis.smembers(key);
+                  size = key.length + JSON.stringify(value).length;
+                  break;
+                }
+                case "list": {
+                  const value = await this.redis.lrange(key, 0, -1);
+                  size = key.length + JSON.stringify(value).length;
+                  break;
+                }
+              }
+
+              totalSampleSize += size;
+              sampledKeys++;
+            } catch (error) {
+              this.logger.warn(`Failed to get size for key: ${key}`, error);
+            }
+          }
+        } while (cursor !== 0 && sampledKeys < sampleSize);
+      }
+
+      // Estimate total usage based on sample
+      const averageKeySize =
+        sampledKeys > 0 ? totalSampleSize / sampledKeys : 0;
+      const estimatedTotalSize = dbSize * averageKeySize;
+
+      // Assume healthy if less than 90% of estimated available memory (100MB as example limit)
+      const assumedMaxMemory = 100 * 1024 * 1024; // 100MB
+      const isHealthy = estimatedTotalSize < assumedMaxMemory * 0.9;
+
+      return {
+        isHealthy,
+        totalSpace: assumedMaxMemory,
+        usedSpace: Math.round(estimatedTotalSize),
+        availableSpace: Math.round(assumedMaxMemory - estimatedTotalSize),
+        utilizationPercent: Math.round(
+          (estimatedTotalSize / assumedMaxMemory) * 100
+        ),
+        totalKeys: dbSize,
+        sampledKeys,
+        averageKeySize: Math.round(averageKeySize),
+        estimationType: "sampling-based",
+      };
+    } catch (error) {
+      this.logger.error("Failed to get storage stats", { error });
+      return {
+        isHealthy: false,
+        error: error instanceof Error ? error.message : "Unknown error",
+      };
+    }
   }
 }
 
-// src/monitoring/dashboard.ts
 export class MonitoringDashboard {
   private readonly metricsCollector: MetricsCollector;
   private readonly alertManager: AlertManager;
   private readonly healthMonitor: HealthMonitor;
+  private readonly redis: Redis;
+  private readonly logger: Logger;
+  private readonly searchOptimizer: SearchOptimizer;
 
   constructor() {
+    this.redis = new Redis({
+      url: process.env.UPSTASH_REDIS_REST_URL!,
+      token: process.env.UPSTASH_REDIS_REST_TOKEN!,
+    });
+    this.logger = Logger.getInstance("production");
     this.metricsCollector = new MetricsCollector();
-    this.alertManager = new AlertManager();
+    this.searchOptimizer = new SearchOptimizer();
+    this.alertManager = new AlertManager(
+      this.redis,
+      this.logger,
+      this.searchOptimizer
+    );
     this.healthMonitor = new HealthMonitor();
   }
 
-  async getDashboardData(timeRange: {
-    start: number;
-    end: number;
-  }): Promise<any> {
-    const [metrics, alerts, health] = await Promise.all([
-      this.metricsCollector.getMetrics(timeRange),
-      this.getAlerts(timeRange),
-      this.healthMonitor.runHealthChecks(),
-    ]);
+  async getDashboardData(timeRange: TimeRange): Promise<DashboardData> {
+    try {
+      const [metrics, alerts, health] = await Promise.all([
+        this.metricsCollector.getMetrics(timeRange),
+        this.alertManager.getAlerts({
+          start: new Date(timeRange.start),
+          end: new Date(timeRange.end),
+        }),
+        this.healthMonitor.runHealthChecks(),
+      ]);
 
-    return {
-      metrics: this.aggregateMetrics(metrics),
-      alerts: this.summarizeAlerts(alerts),
-      health,
-      timestamp: Date.now(),
-    };
+      return {
+        metrics: this.aggregateMetrics(metrics),
+        alerts: this.summarizeAlerts(alerts),
+        health,
+        timestamp: Date.now(),
+      };
+    } catch (error) {
+      throw new Error(
+        `Failed to get dashboard data: ${error instanceof Error ? error.message : "Unknown error"}`
+      );
+    }
   }
 
   private aggregateMetrics(
     metrics: Metric[]
   ): Record<string, MetricAggregation> {
-    return Helpers.groupBy(metrics, "name").reduce((acc, [name, values]) => {
-      acc[name] = {
-        min: Math.min(...values.map((v) => v.value)),
-        max: Math.max(...values.map((v) => v.value)),
-        avg: values.reduce((sum, v) => sum + v.value, 0) / values.length,
-        sum: values.reduce((sum, v) => sum + v.value, 0),
+    const grouped = Helpers.groupBy(metrics, "name");
+    const result: Record<string, MetricAggregation> = {};
+
+    for (const [name, values] of Object.entries(grouped)) {
+      const metricValues = values.map((v) => v.value);
+      result[name] = {
+        min: Math.min(...metricValues),
+        max: Math.max(...metricValues),
+        avg: metricValues.reduce((sum, v) => sum + v, 0) / metricValues.length,
+        sum: metricValues.reduce((sum, v) => sum + v, 0),
         count: values.length,
       };
-      return acc;
-    }, {});
+    }
+
+    return result;
   }
 
   private summarizeAlerts(alerts: Alert[]): Record<AlertSeverity, number> {
-    return alerts.reduce((acc, alert) => {
-      acc[alert.severity] = (acc[alert.severity] || 0) + 1;
-      return acc;
-    }, {} as Record<AlertSeverity, number>);
+    const summary: Record<AlertSeverity, number> = {
+      [AlertSeverity.LOW]: 0,
+      [AlertSeverity.MEDIUM]: 0,
+      [AlertSeverity.HIGH]: 0,
+      [AlertSeverity.CRITICAL]: 0,
+    };
+
+    for (const alert of alerts) {
+      summary[alert.severity]++;
+    }
+
+    return summary;
   }
 }

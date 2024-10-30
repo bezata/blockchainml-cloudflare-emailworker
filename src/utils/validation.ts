@@ -1,21 +1,17 @@
 import { constants } from "../config/constants";
 
-        export class Validator {
-        static isValidEmail(email: string): boolean {
-            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-            return emailRegex.test(email);
-        }
+export class Validator {
+  static isValidEmail(email: string): boolean {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return emailRegex.test(email);
+  }
 
-        static isValidAttachment(
-            filename: string,
-            size: number,
-            mimeType: string
-        ): boolean {
-            return (
-            size <= constants.email.maxAttachmentSize &&
-            constants.email.allowedMimeTypes.includes(mimeType)
-            );
-        }
+  static isValidAttachment(size: number, mimeType: string): boolean {
+    return (
+      size <= constants.email.maxAttachmentSize &&
+      constants.email.allowedMimeTypes.includes(mimeType)
+    );
+  }
 
   static sanitizeString(str: string): string {
     return str.replace(/[<>]/g, "");

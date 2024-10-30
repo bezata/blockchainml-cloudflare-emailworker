@@ -1,55 +1,72 @@
 import { JobScheduler } from "./scheduler";
-import { JobWorker } from "./workers";
-import { JobPriority } from "./types";
+import { JobPriority, TaskType } from "./types";
 import { AnalyticsProcessor } from "@/services/analytics/processor";
+import { Logger } from "@/utils/logger";
+import {
+  AnalyticsTaskPayload,
+  AnalyticsStats,
+} from "@/types/analytics";
 
-export default async function analytics(data: {
-  timeRange: { start: Date; end: Date };
-  metrics: string[];
-}): Promise<Record<string, any>> {
-  const processor = new AnalyticsProcessor();
-  const stats = await processor.aggregateStats(data.timeRange);
-
-  // You might want to store or process these stats further
-  return stats;
+interface AnalyticsResult {
+  success: boolean;
+  stats: AnalyticsStats;
+  processingTime?: number;
+  error?: string;
 }
 
-// Example usage:
-const scheduler = new JobScheduler();
+export default async function analyticsHandler(
+  data: AnalyticsTaskPayload
+): Promise<AnalyticsResult> {
+  const startTime = Date.now();
+  const processor = new AnalyticsProcessor();
+  const logger = Logger.getInstance("production");
 
-// Schedule immediate job
-await scheduler.scheduleJob(
-  "cleanup",
-  {
-    olderThan: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000), // 30 days
-    types: ["attachments", "analytics"],
-  },
-  {
-    priority: JobPriority.LOW,
+  try {
+    logger.info("Starting analytics processing", data);
+
+    const stats = await processor.aggregateStats(data.timeRange);
+
+    logger.info("Analytics processing completed", {
+      processingTime: Date.now() - startTime,
+    });
+
+    return {
+      success: true,
+      stats,
+      processingTime: Date.now() - startTime,
+    };
+  } catch (error) {
+    logger.error("Analytics processing failed:", error);
+    return {
+      success: false,
+      stats: {},
+      error: error instanceof Error ? error.message : "Unknown error occurred",
+    };
   }
-);
+}
 
-// Schedule future job
-await scheduler.scheduleJob(
-  "analytics",
-  {
-    timeRange: {
-      start: new Date(),
-      end: new Date(),
+// Example usage and job scheduling
+export async function scheduleAnalytics(): Promise<void> {
+  const scheduler = new JobScheduler();
+
+  // Schedule daily analytics
+  await scheduler.enqueue<AnalyticsTaskPayload>(
+    TaskType.GENERATE_ANALYTICS,
+    {
+      timeRange: {
+        start: new Date(Date.now() - 24 * 60 * 60 * 1000),
+        end: new Date(),
+      },
+      metrics: ["emailStats", "userActivity", "systemStats"],
+      options: {
+        aggregation: "hour",
+      },
+      startDate: new Date(Date.now() - 24 * 60 * 60 * 1000),
+      endDate: new Date(),
     },
-    metrics: ["emailStats", "userActivity"],
-  },
-  {
-    scheduledFor: new Date(Date.now() + 60 * 60 * 1000), // 1 hour from now
-    priority: JobPriority.NORMAL,
-  }
-);
-
-// Start worker
-const worker = new JobWorker();
-await worker.start();
-
-// Graceful shutdown
-process.on("SIGTERM", async () => {
-  await worker.stop();
-});
+    {
+      priority: JobPriority.LOW,
+      tags: ["analytics", "daily"],
+    }
+  );
+}

@@ -1,7 +1,7 @@
 import { Redis } from "@upstash/redis";
 import { Logger } from "../../utils/logger";
 import { CacheConfig, CacheEntry, CacheStats } from "./types";
-import { Helpers } from "../../utils/helpers";
+import { env } from "process";
 
 export class RedisCache {
   private readonly redis: Redis;
@@ -226,7 +226,8 @@ export class RedisCache {
 
   private updateAccessTime(duration: number): void {
     const current = this.stats.get("avgAccessTime") || 0;
-    const count = this.stats.get("hits") + this.stats.get("misses");
+    const count =
+      (this.stats.get("hits") || 0) + (this.stats.get("misses") || 0);
     this.stats.set("avgAccessTime", (current * (count - 1) + duration) / count);
   }
 

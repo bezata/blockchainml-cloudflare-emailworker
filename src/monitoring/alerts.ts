@@ -1,206 +1,302 @@
 import { Redis } from "@upstash/redis";
 import { Logger } from "../utils/logger";
-import { MetricsCollector } from "./metrics";
-import { Helpers } from "../utils/helpers";
-import { QueueManager } from "@/queue/manager";
-import { TaskType } from "@/api/routes";
-import { env } from "@/config/env";
+import { SearchOptimizer } from "../services/search/optimizer";
 
-export enum AlertSeverity {
-  INFO = "info",
-  WARNING = "warning",
-  ERROR = "error",
-  CRITICAL = "critical",
+export interface TimeRange {
+  start: Date;
+  end: Date;
 }
 
-export interface AlertRule {
-  id: string;
-  name: string;
-  metricName: string;
-  condition: {
-    operator: ">" | "<" | ">=" | "<=" | "==" | "!=";
-    threshold: number;
-  };
-  duration: number; // Time window in milliseconds
-  severity: AlertSeverity;
-  channels: string[];
-  enabled: boolean;
+export enum AlertType {
+  HIGH_MEMORY_USAGE = "HIGH_MEMORY_USAGE",
+  HIGH_CPU_USAGE = "HIGH_CPU_USAGE",
+  SLOW_QUERY = "SLOW_QUERY",
+  INDEX_DEGRADATION = "INDEX_DEGRADATION",
+  DATA_INCONSISTENCY = "DATA_INCONSISTENCY",
+  OPTIMIZATION_FAILURE = "OPTIMIZATION_FAILURE",
+  CONNECTION_ISSUES = "CONNECTION_ISSUES",
+}
+
+export enum AlertSeverity {
+  LOW = "LOW",
+  MEDIUM = "MEDIUM",
+  HIGH = "HIGH",
+  CRITICAL = "CRITICAL",
+}
+
+export enum AlertStatus {
+  ACTIVE = "ACTIVE",
+  RESOLVED = "RESOLVED",
+  ACKNOWLEDGED = "ACKNOWLEDGED",
 }
 
 export interface Alert {
   id: string;
-  ruleId: string;
-  message: string;
+  type: AlertType;
   severity: AlertSeverity;
-  metricValue: number;
-  timestamp: number;
+  message: string;
+  details: Record<string, any>;
+  timestamp: number; // Unix timestamp in milliseconds
+  status: AlertStatus;
   acknowledged: boolean;
-  acknowledgedBy?: string;
-  acknowledgedAt?: number;
+  acknowledgedBy: string | undefined;
+  acknowledgedAt: number | undefined; // Unix timestamp in milliseconds
+}
+
+export interface IndexStats {
+  totalTerms: number;
+  totalDocuments: number;
+  averageTermFrequency: number;
+  termDistribution: {
+    high: number;
+    medium: number;
+    low: number;
+  };
+  storageUsage: {
+    terms: number;
+    metadata: number;
+    total: number;
+  };
+  health: {
+    status: "healthy" | "degraded" | "unhealthy";
+    issues: string[];
+  };
+}
+
+export interface StorageStats {
+  isHealthy: boolean;
+  totalSpace: number;
+  usedSpace: number;
+  availableSpace: number;
+  utilizationPercent: number;
 }
 
 export class AlertManager {
   private readonly redis: Redis;
   private readonly logger: Logger;
-  private readonly queueManager: QueueManager;
-  private readonly RULES_KEY = "monitoring:alert:rules";
-  private readonly ALERTS_KEY = "monitoring:alerts";
-  private readonly metricsCollector: MetricsCollector;
+  private readonly searchOptimizer: SearchOptimizer;
 
-  constructor() {
-    this.redis = new Redis({
-      url: env.UPSTASH_REDIS_REST_URL,
-      token: env.UPSTASH_REDIS_REST_TOKEN,
-    });
-    this.logger = Logger.getInstance("production");
-    this.queueManager = new QueueManager();
-    this.metricsCollector = new MetricsCollector();
+  constructor(redis: Redis, logger: Logger, searchOptimizer: SearchOptimizer) {
+    this.redis = redis;
+    this.logger = logger;
+    this.searchOptimizer = searchOptimizer;
   }
 
-  async createRule(rule: Omit<AlertRule, "id">): Promise<string> {
-    const id = Helpers.generateId();
-    const fullRule: AlertRule = {
-      ...rule,
-      id,
-      enabled: true,
-    };
+  async getAlerts(timeRange: TimeRange): Promise<Alert[]> {
+    try {
+      const alerts: Alert[] = [];
+      const pipeline = this.redis.pipeline();
 
-    await this.redis.hset(this.RULES_KEY, {
-      [id]: JSON.stringify(fullRule),
-    });
-
-    return id;
-  }
-
-  async evaluateRules(): Promise<void> {
-    const rules = await this.getEnabledRules();
-    const now = Date.now();
-
-    for (const rule of rules) {
-      const metrics = await this.metricsCollector.getMetrics(
-        {
-          start: now - rule.duration,
-          end: now,
-        },
-        { name: rule.metricName }
+      // Get alerts from Redis sorted set using time range
+      const alertKeys = await this.redis.zrange(
+        "search:alerts",
+        timeRange.start.getTime(),
+        timeRange.end.getTime(),
+        { byScore: true }
       );
 
-      if (metrics.length === 0) continue;
-
-      const latestValue = metrics[metrics.length - 1].value;
-      if (this.evaluateCondition(latestValue, rule.condition)) {
-        await this.createAlert({
-          ruleId: rule.id,
-          message: `Alert: ${rule.name} - Threshold ${rule.condition.operator} ${rule.condition.threshold} violated. Current value: ${latestValue}`,
-          severity: rule.severity,
-          metricValue: latestValue,
-        });
+      // Fetch alert details in batch
+      for (const key of alertKeys) {
+        pipeline.hgetall(`search:alert:${key}`);
       }
+
+      const alertDetails = await pipeline.exec();
+
+      // Process and validate alert data
+      alerts.push(
+        ...alertDetails
+          .filter((result): result is Record<string, string> => result !== null)
+          .map((data) => this.parseAlertData(data))
+          .filter((alert): alert is Alert => alert !== null)
+      );
+
+      // Get system health metrics
+      const healthStats = await this.searchOptimizer.analyzeIndexHealth();
+      const storageStats = await this.searchOptimizer.getStorageStats();
+
+      // Generate alerts based on current system state
+      await this.generateSystemAlerts(healthStats, storageStats);
+
+      // Sort alerts by severity and timestamp
+      return this.sortAlerts(alerts);
+    } catch (error) {
+      this.logger.error("Failed to retrieve alerts", { error, timeRange });
+      throw error;
     }
   }
 
-  private async getEnabledRules(): Promise<AlertRule[]> {
-    const rules = await this.redis.hgetall(this.RULES_KEY);
-    return Object.values(rules)
-      .map((r) => JSON.parse(r))
-      .filter((r) => r.enabled);
-  }
+  private parseAlertData(data: Record<string, string>): Alert | null {
+    try {
+      if (!data.id || !data.type || !data.severity || !data.message) {
+        return null;
+      }
 
-  private evaluateCondition(
-    value: number,
-    condition: AlertRule["condition"]
-  ): boolean {
-    switch (condition.operator) {
-      case ">":
-        return value > condition.threshold;
-      case "<":
-        return value < condition.threshold;
-      case ">=":
-        return value >= condition.threshold;
-      case "<=":
-        return value <= condition.threshold;
-      case "==":
-        return value === condition.threshold;
-      case "!=":
-        return value !== condition.threshold;
-      default:
-        return false;
+      return {
+        id: data.id,
+        type: data.type as AlertType,
+        severity: data.severity as AlertSeverity,
+        message: data.message,
+        details: JSON.parse(data.details || "{}"),
+        timestamp: parseInt(data.timestamp || "0"),
+        status: (data.status as AlertStatus) || AlertStatus.ACTIVE,
+        acknowledged: data.acknowledged === "true",
+        acknowledgedBy: data.acknowledgedBy || undefined,
+        acknowledgedAt: data.acknowledgedAt
+          ? parseInt(data.acknowledgedAt)
+          : undefined,
+      };
+    } catch (error) {
+      this.logger.error("Failed to parse alert data", { error, data });
+      return null;
     }
   }
 
-  private async createAlert(
-    alert: Omit<Alert, "id" | "timestamp" | "acknowledged">
+  private async generateSystemAlerts(
+    healthStats: IndexStats,
+    storageStats: StorageStats
   ): Promise<void> {
-    const fullAlert: Alert = {
-      ...alert,
-      id: Helpers.generateId(),
-      timestamp: Date.now(),
-      acknowledged: false,
+    const now = Date.now();
+
+    // Check storage usage
+    if (!storageStats.isHealthy) {
+      await this.createAlert({
+        id: `storage_${now}`,
+        type: AlertType.HIGH_MEMORY_USAGE,
+        severity: AlertSeverity.HIGH,
+        message: "High storage usage detected",
+        details: {
+          utilizationPercent: storageStats.utilizationPercent,
+          availableSpace: storageStats.availableSpace,
+        },
+        timestamp: now,
+        status: AlertStatus.ACTIVE,
+        acknowledged: false,
+        acknowledgedBy: undefined,
+        acknowledgedAt: undefined,
+      });
+    }
+
+    // Check index health
+    if (healthStats.health.status !== "healthy") {
+      await this.createAlert({
+        id: `index_${now}`,
+        type: AlertType.INDEX_DEGRADATION,
+        severity:
+          healthStats.health.status === "unhealthy"
+            ? AlertSeverity.CRITICAL
+            : AlertSeverity.MEDIUM,
+        message: "Index health issues detected",
+        details: {
+          issues: healthStats.health.issues,
+          termDistribution: healthStats.termDistribution,
+          averageTermFrequency: healthStats.averageTermFrequency,
+        },
+        timestamp: now,
+        status: AlertStatus.ACTIVE,
+        acknowledged: false,
+        acknowledgedBy: undefined,
+        acknowledgedAt: undefined,
+      });
+    }
+
+    // Check for data inconsistencies
+    if (healthStats.totalTerms === 0 && healthStats.totalDocuments > 0) {
+      await this.createAlert({
+        id: `consistency_${now}`,
+        type: AlertType.DATA_INCONSISTENCY,
+        severity: AlertSeverity.HIGH,
+        message: "Data inconsistency detected in search index",
+        details: {
+          totalTerms: healthStats.totalTerms,
+          totalDocuments: healthStats.totalDocuments,
+        },
+        timestamp: now,
+        status: AlertStatus.ACTIVE,
+        acknowledged: false,
+        acknowledgedBy: undefined,
+        acknowledgedAt: undefined,
+      });
+    }
+  }
+
+  private sortAlerts(alerts: Alert[]): Alert[] {
+    const severityWeight = {
+      [AlertSeverity.CRITICAL]: 4,
+      [AlertSeverity.HIGH]: 3,
+      [AlertSeverity.MEDIUM]: 2,
+      [AlertSeverity.LOW]: 1,
     };
 
-    await this.redis.zadd(this.ALERTS_KEY, {
-      score: fullAlert.timestamp,
-      member: JSON.stringify(fullAlert),
-    });
+    return alerts.sort((a, b) => {
+      // Sort by severity
+      const severityDiff =
+        severityWeight[b.severity] - severityWeight[a.severity];
+      if (severityDiff !== 0) return severityDiff;
 
-    await this.notifyAlertChannels(fullAlert);
+      // Then sort by timestamp (newest first)
+      return b.timestamp - a.timestamp;
+    });
   }
 
-  private async notifyAlertChannels(alert: Alert): Promise<void> {
-    const rule = JSON.parse(
-      await this.redis.hget(this.RULES_KEY, alert.ruleId)
-    ) as AlertRule;
+  async createAlert(alert: Alert): Promise<void> {
+    try {
+      const pipeline = this.redis.pipeline();
+      const key = `search:alert:${alert.id}`;
 
-    for (const channel of rule.channels) {
-      try {
-        await this.sendAlertNotification(channel, alert);
-      } catch (error) {
-        this.logger.error(`Failed to send alert to channel ${channel}:`, error);
-      }
+      // Store alert data
+      pipeline.hmset(key, {
+        ...alert,
+        details: JSON.stringify(alert.details),
+        acknowledged: alert.acknowledged.toString(),
+      });
+
+      // Add to sorted set for time-based queries
+      pipeline.zadd("search:alerts", {
+        score: alert.timestamp,
+        member: alert.id,
+      });
+
+      await pipeline.exec();
+
+      this.logger.info("Alert created", {
+        alertId: alert.id,
+        type: alert.type,
+      });
+    } catch (error) {
+      this.logger.error("Failed to create alert", { error, alert });
+      throw error;
     }
   }
 
-  private async sendAlertNotification(
-    channel: string,
-    alert: Alert
-  ): Promise<void> {
-    // Implement different notification channels (email, Slack, etc.)
-    switch (channel) {
-      case "email":
-        await this.queueManager.enqueueTask(TaskType.SEND_EMAIL, {
-          to: alert.acknowledgedBy || "admin@example.com",
-          subject: `Alert: ${alert.severity.toUpperCase()} - ${alert.message}`,
-          body: `
-            Alert Details:
-            Severity: ${alert.severity}
-            Message: ${alert.message}
-            Metric Value: ${alert.metricValue}
-            Time: ${new Date(alert.timestamp).toLocaleString()}
-          `,
-        });
-        break;
-      case "slack":
-        // Implement Slack webhook integration
-        const webhookUrl = process.env.SLACK_WEBHOOK_URL;
-        if (!webhookUrl) {
-          this.logger.error("Slack webhook URL not configured");
-          return;
-        }
+  async acknowledgeAlert(alertId: string, userId: string): Promise<void> {
+    try {
+      const key = `search:alert:${alertId}`;
+      const exists = await this.redis.exists(key);
 
-        await fetch(webhookUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            text: `🚨 *${alert.severity.toUpperCase()}* Alert\n${
-              alert.message
-            }\nMetric Value: ${alert.metricValue}`,
-          }),
-        });
-        break;
-      default:
-        this.logger.warn(`Unknown alert channel: ${channel}`);
+      if (!exists) {
+        throw new Error(`Alert ${alertId} not found`);
+      }
+
+      const now = Date.now();
+      await this.redis.hmset(key, {
+        acknowledged: "true",
+        acknowledgedBy: userId,
+        acknowledgedAt: now.toString(),
+        status: AlertStatus.ACKNOWLEDGED,
+      });
+
+      this.logger.info("Alert acknowledged", {
+        alertId,
+        userId,
+        timestamp: now,
+      });
+    } catch (error) {
+      this.logger.error("Failed to acknowledge alert", {
+        error,
+        alertId,
+        userId,
+      });
+      throw error;
     }
   }
 }

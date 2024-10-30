@@ -1,13 +1,19 @@
 import { OpenAPIHono } from "@hono/zod-openapi";
-import { Context } from "hono";
+import { Context, Env } from "hono";
 import { z } from "zod";
 import { QueueManager } from "../../services/storage/queue";
-import type { Env } from "@/types/env";
+import { WorkerEnv } from "@/services/storage/queue";
 import { QueueTask } from "@/types/queue";
 import { TaskPayload } from "@/types/queue";
 
 const queueRoutes = new OpenAPIHono<Env>();
-const queueManager = new QueueManager();
+const queueManager = new QueueManager({
+  UPSTASH_REDIS_REST_URL: process.env.UPSTASH_REDIS_REST_URL!,
+  UPSTASH_REDIS_REST_TOKEN: process.env.UPSTASH_REDIS_REST_TOKEN!,
+  EMAIL_DOMAIN: process.env.EMAIL_DOMAIN!,
+  DEFAULT_FROM_EMAIL: process.env.DEFAULT_FROM_EMAIL!,
+  // Add any other required WorkerEnv properties
+} as WorkerEnv);
 
 // Response schemas
 const TaskStatusSchema = z.object({
@@ -78,6 +84,7 @@ queueRoutes.openapi(
       },
     },
   },
+  // @ts-ignore
   async (c: Context) => {
     const taskId = c.req.param("taskId");
     const status = await queueManager.getTaskStatus(taskId);
@@ -88,7 +95,15 @@ queueRoutes.openapi(
 
     return c.json({
       success: true,
-      data: status,
+      data: {
+        id: status.id,
+        type: status.type,
+        status: status.status,
+        attempts: status.attempts,
+        lastAttemptAt: status.lastAttemptAt,
+        error: status.error,
+        completedAt: status.completedAt,
+      },
     });
   }
 );
@@ -127,12 +142,10 @@ queueRoutes.openapi(
     const page = Number(c.req.query("page")) || 1;
     const limit = Number(c.req.query("limit")) || 50;
     const start = (page - 1) * limit;
-    const end = start + limit - 1;
 
     const failedTasks = await queueManager.getFailedTasks({
       limit,
       offset: start,
-      end: end,
     });
 
     const tasks = failedTasks.map((task: QueueTask<TaskPayload>) =>
