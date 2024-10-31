@@ -131,10 +131,10 @@ async function cleanupStorage(
   }
 
   const s3 = new S3Client({
-    region: "us-east-1",
+    region: "auto",
     credentials: {
-      accessKeyId: "your-access-key-id",
-      secretAccessKey: "your-secret-access-key",
+      accessKeyId: Bun.env.R2_ACCESS_KEY!,
+      secretAccessKey: Bun.env.R2_SECRET_KEY!,
     },
   });
 
@@ -224,8 +224,8 @@ async function cleanupCache(
   options: CleanupOptions
 ): Promise<void> {
   const redis = new Redis({
-    url: process.env.UPSTASH_REDIS_REST_URL!,
-    token: process.env.UPSTASH_REDIS_REST_TOKEN!,
+    url: Bun.env.UPSTASH_REDIS_REST_URL,
+    token: Bun.env.UPSTASH_REDIS_REST_TOKEN,
   });
 
   const path = options.path.replace("cache://", "");

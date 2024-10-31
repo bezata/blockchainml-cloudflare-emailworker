@@ -22,8 +22,8 @@ export class JobWorker {
     this.scheduler = JobScheduler.getInstance();
     this.logger = Logger.getInstance("production");
     this.redis = new Redis({
-      url: process.env.UPSTASH_REDIS_REST_URL!,
-      token: process.env.UPSTASH_REDIS_REST_TOKEN!,
+      url: Bun.env.UPSTASH_REDIS_REST_URL!,
+      token: Bun.env.UPSTASH_REDIS_REST_TOKEN!,
     });
   }
 

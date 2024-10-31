@@ -76,8 +76,8 @@ export class JobScheduler {
 
   constructor() {
     this.redis = new Redis({
-      url: process.env.UPSTASH_REDIS_REST_URL,
-      token: process.env.UPSTASH_REDIS_REST_TOKEN,
+      url: Bun.env.UPSTASH_REDIS_REST_URL,
+      token: Bun.env.UPSTASH_REDIS_REST_TOKEN,
     });
     this.logger = Logger.getInstance("production");
   }
@@ -127,7 +127,7 @@ export class JobScheduler {
         id: Helpers.generateId(),
         type,
         data,
-        env: (process.env.NODE_ENV as Env) || "production",
+        env: (Bun.env.NODE_ENV as Env) || "development",
         priority: options.priority || JobPriority.NORMAL,
         status: options.scheduledFor ? JobStatus.SCHEDULED : JobStatus.PENDING,
         attempts: 0,

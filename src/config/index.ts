@@ -1,42 +1,41 @@
-export const config = {
+import { getEnvVar } from "../utils/env";
+import { env } from "@/types/env";
+
+export const createConfig = (env: env["Bindings"]) => ({
   app: {
     name: "email-worker",
     version: "1.0.0",
+    environment: getEnvVar("ENVIRONMENT", env),
+    nodeEnv: getEnvVar("NODE_ENV", env),
+    apiVersion: getEnvVar("API_VERSION", env),
   },
   cors: {
-    allowedOrigins: ["https://yourdomain.com", "http://localhost:3000"],
-  },
-  mongodb: {
-    dbName: "emailService",
-    collections: {
-      emails: "emails",
-      threads: "threads",
-      analytics: "analytics",
-    },
+    allowedOrigins: getEnvVar("ALLOWED_ORIGINS", env)?.split(",") || ["*"],
   },
   email: {
-    maxAttachmentSize: 10 * 1024 * 1024, // 10MB
-    allowedAttachmentTypes: [
+    domain: getEnvVar("EMAIL_DOMAIN", env),
+    defaultFrom: getEnvVar("DEFAULT_FROM_EMAIL", env),
+    maxAttachmentSize:
+      parseInt(getEnvVar("MAX_ATTACHMENT_SIZE", env)) || 10 * 1024 * 1024,
+    allowedMimeTypes: getEnvVar("ALLOWED_MIME_TYPES", env)?.split(",") || [
       "application/pdf",
       "image/jpeg",
       "image/png",
       "application/msword",
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ],
-    spamScoreThreshold: 0.5,
+    retentionDays: parseInt(getEnvVar("EMAIL_RETENTION_DAYS", env)) || 30,
   },
-  api: {
-    rateLimit: {
-      windowMs: 15 * 60 * 1000, // 15 minutes
-      max: 100, // limit each IP to 100 requests per windowMs
-    },
-    pagination: {
-      defaultLimit: 50,
-      maxLimit: 100,
-    },
+  redis: {
+    url: env.UPSTASH_REDIS_REST_URL || "",
+    token: env.UPSTASH_REDIS_REST_TOKEN || "",
   },
-  cache: {
-    ttl: 60 * 60, // 1 hour
-    prefix: "email-worker:",
+  r2: {
+    bucket: getEnvVar("R2_BUCKET", env),
+    accessKey: getEnvVar("R2_ACCESS_KEY", env),
+    secretKey: getEnvVar("R2_SECRET_KEY", env),
+    accountId: getEnvVar("R2_ACCOUNT_ID", env),
   },
-};
+  search: {
+    batchSize: parseInt(getEnvVar("SEARCH_INDEX_BATCH_SIZE", env)) || 100,
+  },
+});

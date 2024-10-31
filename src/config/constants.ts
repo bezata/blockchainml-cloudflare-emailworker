@@ -36,6 +36,6 @@ export const constants = {
     bcryptRounds: 10,
   },
   r2: {
-    accountId: process.env.R2_ACCOUNT_ID || "",
+    accountId: Bun.env.R2_ACCOUNT_ID || "",
   },
 };

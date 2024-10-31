@@ -31,7 +31,7 @@ export async function errorMiddleware(c: Context, next: Next) {
         error: {
           message,
           code: status,
-          ...(c.env.ENVIRONMENT === "development" && {
+          ...(Bun.env.ENVIRONMENT === "development" && {
             stack: error instanceof Error ? error.stack : undefined,
           }),
         },

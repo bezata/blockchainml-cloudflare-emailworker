@@ -8,10 +8,10 @@ import { TaskPayload } from "@/types/queue";
 
 const queueRoutes = new OpenAPIHono<Env>();
 const queueManager = new QueueManager({
-  UPSTASH_REDIS_REST_URL: process.env.UPSTASH_REDIS_REST_URL!,
-  UPSTASH_REDIS_REST_TOKEN: process.env.UPSTASH_REDIS_REST_TOKEN!,
-  EMAIL_DOMAIN: process.env.EMAIL_DOMAIN!,
-  DEFAULT_FROM_EMAIL: process.env.DEFAULT_FROM_EMAIL!,
+  UPSTASH_REDIS_REST_URL: Bun.env.UPSTASH_REDIS_REST_URL!,
+  UPSTASH_REDIS_REST_TOKEN: Bun.env.UPSTASH_REDIS_REST_TOKEN!,
+  EMAIL_DOMAIN: Bun.env.EMAIL_DOMAIN!,
+  DEFAULT_FROM_EMAIL: Bun.env.DEFAULT_FROM_EMAIL!,
   // Add any other required WorkerEnv properties
 } as WorkerEnv);
 

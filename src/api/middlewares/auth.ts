@@ -6,8 +6,6 @@ import { StatusCode } from "hono/utils/http-status";
 // Define environment variable bindings
 export interface Bindings {
   JWT_SECRET: string;
-  REDIS_URL: string;
-  REDIS_TOKEN: string;
   NODE_ENV: string;
   API_VERSION: string;
   MONGODB_URI: string;
@@ -61,7 +59,7 @@ const cache = new RedisCache({
 export async function authMiddleware(c: AuthContext, next: Next) {
   try {
     // Validate JWT_SECRET configuration
-    if (!c.env.JWT_SECRET) {
+    if (!Bun.env.JWT_SECRET) {
       throw new AuthError(500, "JWT_SECRET is not configured");
     }
 
@@ -85,7 +83,7 @@ export async function authMiddleware(c: AuthContext, next: Next) {
       // Verify and decode token
       const payload = (await verify(
         token,
-        c.env.JWT_SECRET
+        Bun.env.JWT_SECRET
       )) as unknown as JWTPayload;
 
       // Validate payload

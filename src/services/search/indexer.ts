@@ -2,7 +2,6 @@ import { Redis } from "@upstash/redis";
 import { Logger } from "@/utils/logger";
 import { Helpers } from "@/utils/helpers";
 import { SearchDocument, SearchOptions, SearchStats } from "./types";
-import { env } from "process";
 
 export class SearchIndexer {
   private readonly redis: Redis;
@@ -20,8 +19,8 @@ export class SearchIndexer {
 
   constructor() {
     this.redis = new Redis({
-      url: env.UPSTASH_REDIS_REST_URL || "",
-      token: env.UPSTASH_REDIS_REST_TOKEN || "",
+      url: Bun.env.UPSTASH_REDIS_REST_URL,
+      token: Bun.env.UPSTASH_REDIS_REST_TOKEN,
     });
     this.logger = Logger.getInstance("production");
 

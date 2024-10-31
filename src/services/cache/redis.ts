@@ -1,7 +1,7 @@
+require("dotenv").config();
 import { Redis } from "@upstash/redis";
 import { Logger } from "../../utils/logger";
 import { CacheConfig, CacheEntry, CacheStats } from "./types";
-import { env } from "process";
 
 export class RedisCache {
   private readonly redis: Redis;
@@ -11,8 +11,8 @@ export class RedisCache {
 
   constructor(config: CacheConfig) {
     this.redis = new Redis({
-      url: env.UPSTASH_REDIS_REST_URL,
-      token: env.UPSTASH_REDIS_REST_TOKEN,
+      url: Bun.env.UPSTASH_REDIS_REST_URL,
+      token: Bun.env.UPSTASH_REDIS_REST_TOKEN,
     });
     this.logger = Logger.getInstance("production");
     this.config = {

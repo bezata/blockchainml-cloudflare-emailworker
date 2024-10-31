@@ -4,7 +4,7 @@
     "module": "esnext",
     "lib": ["esnext"],
     "moduleResolution": "node",
-    "types": ["@cloudflare/workers-types", "@types/node"],
+    "types": ["@cloudflare/workers-types", "@types/node", "@types/bun"],
     "resolveJsonModule": true,
     "allowJs": true,
     "checkJs": false,

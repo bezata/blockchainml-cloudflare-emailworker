@@ -33,3 +33,10 @@ lerna-debug.log*
 .DS_Store
 *.development
 .env.staging
+.env.production
+.env.development
+.env.local
+
+bun.lockb
+# wrangler
+wrangler.toml

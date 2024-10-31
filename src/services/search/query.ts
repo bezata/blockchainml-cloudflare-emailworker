@@ -45,10 +45,10 @@ export class SearchQueryEngine {
   private readonly logger: Logger;
   private readonly indexer: InternalIndexer;
 
-  constructor(redisUrl: string, redisToken: string) {
+  constructor() {
     this.redis = new Redis({
-      url: redisUrl,
-      token: redisToken,
+      url: Bun.env.UPSTASH_REDIS_REST_URL,
+      token: Bun.env.UPSTASH_REDIS_REST_TOKEN,
     });
     this.logger = Logger.getInstance("production");
     this.indexer = new SearchIndexer() as InternalIndexer;

@@ -72,8 +72,8 @@ export class QueueManager {
     this.logger = Logger.getInstance("production");
     this.env = env;
     this.redis = new Redis({
-      url: env.UPSTASH_REDIS_REST_URL,
-      token: env.UPSTASH_REDIS_REST_TOKEN,
+      url: Bun.env.UPSTASH_REDIS_REST_URL,
+      token: Bun.env.UPSTASH_REDIS_REST_TOKEN,
     });
   }
 

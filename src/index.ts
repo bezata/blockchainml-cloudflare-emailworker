@@ -6,18 +6,19 @@ import { cors } from "hono/cors";
 import { timing } from "hono/timing";
 import { secureHeaders } from "hono/secure-headers";
 import { cache } from "hono/cache";
-import { config } from "./config";
 import { emailRoutes } from "./api/routes/email";
 import { threadRoutes } from "./api/routes/thread";
 import { analyticsRoutes } from "./api/routes/analytics";
 import { queueRoutes } from "./api/routes/queue";
 import { authMiddleware } from "@/api/middlewares/auth";
-import { rateLimitMiddleware } from "@/api/middlewares/rateLimit";
 import { errorMiddleware } from "@/api/middlewares/error";
-import { QueueManager, WorkerEnv } from "./services/storage/queue";
+import { QueueManager } from "./services/storage/queue";
 import { StatusCode } from "hono/utils/http-status";
+import { Context } from "hono";
 
-// OpenAPI Specification
+// Create OpenAPI app instance
+const app = new OpenAPIHono<{ Bindings: Env }>();
+
 const openApiSpec = {
   openapi: "3.0.0",
   info: {
@@ -143,14 +144,9 @@ const openApiSpec = {
   security: [{ bearerAuth: [] }, { apiKey: [] }],
 };
 
-// Create OpenAPI app instance
-const app = new OpenAPIHono<AppBindings>();
-const queueManager = new QueueManager({
-  UPSTASH_REDIS_REST_URL: process.env.UPSTASH_REDIS_REST_URL!,
-  UPSTASH_REDIS_REST_TOKEN: process.env.UPSTASH_REDIS_REST_TOKEN!,
-  EMAIL_DOMAIN: process.env.EMAIL_DOMAIN!,
-  DEFAULT_FROM_EMAIL: process.env.DEFAULT_FROM_EMAIL!,
-} as WorkerEnv);
+// The base unprotected app for public routes
+const publicApp = new OpenAPIHono<{ Bindings: Env }>();
+const apiApp = new OpenAPIHono<{ Bindings: Env }>();
 
 // Global Middlewares
 app.use("*", logger());
@@ -159,41 +155,65 @@ app.use("*", prettyJSON());
 app.use("*", secureHeaders());
 app.use("*", errorMiddleware);
 
-// CORS configuration
+// CORS middleware
 app.use(
   "*",
   cors({
-    origin: config.cors.allowedOrigins,
-    allowMethods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
-    allowHeaders: ["Authorization", "Content-Type", "X-API-Key"],
-    exposeHeaders: ["X-Request-ID", "X-Response-Time"],
-    maxAge: 86400,
+    origin: "*",
+    allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allowHeaders: ["Content-Type", "Authorization", "X-API-Key"],
+    exposeHeaders: ["X-Total-Count", "X-Request-ID"],
     credentials: true,
+    maxAge: 86400,
   })
 );
 
-// Documentation routes
-app.get(
+// Initialize queue manager middleware
+app.use("*", async (c, next) => {
+  try {
+    const queueManager = new QueueManager({
+      UPSTASH_REDIS_REST_URL: Bun.env.UPSTASH_REDIS_REST_URL!,
+      UPSTASH_REDIS_REST_TOKEN: Bun.env.UPSTASH_REDIS_REST_TOKEN!,
+      EMAIL_DOMAIN: Bun.env.EMAIL_DOMAIN!,
+      DEFAULT_FROM_EMAIL: Bun.env.DEFAULT_FROM_EMAIL!,
+      //@ts-expect-error: i am just tired bro
+      ATTACHMENT_BUCKET: Bun.env.ATTACHMENT_BUCKET!,
+      //@ts-expect-error: i am just tired bro
+      KV_STORE: Bun.env.KV_STORE!,
+      MONGODB_URI: Bun.env.MONGODB_URI!,
+    });
+    c.set("queueManager", queueManager);
+    await next();
+  } catch (error) {
+    console.error("Failed to initialize queue manager:", error);
+    return c.json({ error: "Service initialization failed" }, 500);
+  }
+});
+
+// Public routes (no auth required)
+publicApp.get("/", (c) =>
+  c.json({ status: "ok", message: "BlockchainML Email Worker API" })
+);
+
+publicApp.get("/health", async (c) => {
+  const metrics = await getSystemMetrics(c);
+  return c.json({
+    status: "healthy",
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    metrics,
+  });
+});
+
+// Swagger documentation routes
+publicApp.get(
   "/docs",
   swaggerUI({
-    urls: [
-      {
-        url: "/api-docs",
-        name: "Current Environment",
-      },
-      {
-        url: "https://api.blockchainml.com/api-docs",
-        name: "Production",
-      },
-      {
-        url: "https://staging-api.blockchainml.com/api-docs",
-        name: "Staging",
-      },
-    ],
+    url: "/api-docs",
   })
 );
 
-app.get(
+publicApp.get(
   "/api-docs",
   cache({
     cacheName: "api-docs",
@@ -202,101 +222,16 @@ app.get(
   (c) => c.json(openApiSpec)
 );
 
-// Health check route schema
-const healthCheckSchema = z.object({
-  status: z.enum(["healthy", "degraded", "unhealthy"]),
-  version: z.string(),
-  timestamp: z.string().datetime(),
-  uptime: z.number(),
-  metrics: z.object({
-    memory: z.object({
-      usage: z.record(z.number()),
-      heapLimit: z.number(),
-    }),
-    cpu: z.object({
-      usage: z.record(z.number()),
-      loadAvg: z.number(),
-    }),
-    queue: z.object({
-      pending: z.number(),
-    }),
-  }),
-});
+// Protected API routes
+apiApp.use("*", authMiddleware);
+apiApp.route("/emails", emailRoutes);
+apiApp.route("/threads", threadRoutes);
+apiApp.route("/analytics", analyticsRoutes);
+apiApp.route("/queue", queueRoutes);
 
-// Health check endpoint
-const healthCheckRoute = createRoute({
-  method: "get",
-  path: "/health",
-  tags: ["system"],
-  summary: "System health check",
-  description: "Returns the current status and health metrics of the API",
-  responses: {
-    200: {
-      description: "System health information",
-      content: {
-        "application/json": {
-          schema: healthCheckSchema,
-        },
-      },
-    },
-  },
-});
-
-app.openapi(healthCheckRoute, async (c) => {
-  const metrics = await getSystemMetrics();
-  return c.json({
-    status: "healthy" as const,
-    version: config.app.version,
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    metrics,
-  });
-});
-
-// API Routes with OpenAPI config
-const apiRoute = createRoute({
-  method: "get",
-  path: "/api/v1",
-  security: [{ bearerAuth: [] }, { apiKey: [] }],
-  responses: {
-    200: {
-      description: "API root endpoint",
-      content: {
-        "application/json": {
-          schema: z.object({
-            message: z.string(),
-          }),
-        },
-      },
-    },
-  },
-});
-
-const api = app.openapi(apiRoute, (c) => {
-  return c.json({ message: "API root endpoint" });
-});
-
-// Apply rate limiting to API routes
-api.use("*", rateLimitMiddleware);
-api.use("*", authMiddleware);
-
-// Mount route handlers with proper typing
-api.route("/emails", emailRoutes);
-api.route("/threads", threadRoutes);
-api.route("/analytics", analyticsRoutes);
-api.route("/queue", queueRoutes);
-
-// Custom error class
-class APIError extends Error {
-  constructor(
-    public status: number,
-    message: string,
-    public details?: unknown
-  ) {
-    super(message);
-    this.name = "APIError";
-  }
-}
+// Mount sub-applications
+app.route("", publicApp);
+app.route("/api/v1", apiApp);
 
 // Error handling
 app.onError((err, c) => {
@@ -307,16 +242,16 @@ app.onError((err, c) => {
     requestId: c.req.header("X-Request-ID"),
   });
 
-  if (err instanceof APIError) {
+  if (err instanceof Error) {
+    const status = (err as any).status || 500;
     return c.json(
       {
-        status: err.status,
+        status,
         message: err.message,
-        details: err.details,
         requestId: c.req.header("X-Request-ID"),
         timestamp: new Date().toISOString(),
       },
-      err.status as StatusCode
+      status as StatusCode
     );
   }
 
@@ -332,7 +267,8 @@ app.onError((err, c) => {
 });
 
 // Helper function for health metrics
-async function getSystemMetrics() {
+async function getSystemMetrics(c: Context) {
+  const queueManager = c.get("queueManager");
   const pendingJobs = await queueManager.getQueueStats();
 
   return {
@@ -340,26 +276,29 @@ async function getSystemMetrics() {
       usage: process.memoryUsage(),
       heapLimit: process.memoryUsage().heapTotal,
     },
-    cpu: {
-      usage: process.cpuUsage(),
-      loadAvg: 0, // Workers don't have access to this
-    },
     queue: {
       pending: pendingJobs.pending,
     },
   };
 }
 
+// Types
+type Env = {
+  JWT_SECRET: string;
+  API_KEY: string;
+  ENVIRONMENT: string;
+  UPSTASH_REDIS_REST_URL: string;
+  UPSTASH_REDIS_REST_TOKEN: string;
+  EMAIL_DOMAIN: string;
+  DEFAULT_FROM_EMAIL: string;
+  [key: string]: string | undefined;
+};
+
+declare module "hono" {
+  interface ContextVariableMap {
+    queueManager: QueueManager;
+  }
+}
+
 export type AppType = typeof app;
 export default app;
-
-// Add this type definition
-type AppBindings = {
-  Bindings: {
-    MONGODB_URI: string;
-    JWT_SECRET: string;
-    EMAIL_QUEUE: string;
-    API_KEY: string;
-    ENVIRONMENT: string;
-  };
-};

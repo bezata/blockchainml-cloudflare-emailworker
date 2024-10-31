@@ -36,15 +36,15 @@ export class HealthMonitor {
 
   constructor() {
     if (
-      !process.env.UPSTASH_REDIS_REST_URL ||
-      !process.env.UPSTASH_REDIS_REST_TOKEN
+      !Bun.env.UPSTASH_REDIS_REST_URL ||
+      !Bun.env.UPSTASH_REDIS_REST_TOKEN
     ) {
       throw new Error("Redis configuration is missing");
     }
 
     this.redis = new Redis({
-      url: process.env.UPSTASH_REDIS_REST_URL,
-      token: process.env.UPSTASH_REDIS_REST_TOKEN,
+      url: Bun.env.UPSTASH_REDIS_REST_URL,
+      token: Bun.env.UPSTASH_REDIS_REST_TOKEN,
     });
     this.logger = Logger.getInstance("production");
 
@@ -297,8 +297,8 @@ export class MonitoringDashboard {
 
   constructor() {
     this.redis = new Redis({
-      url: process.env.UPSTASH_REDIS_REST_URL!,
-      token: process.env.UPSTASH_REDIS_REST_TOKEN!,
+      url: Bun.env.UPSTASH_REDIS_REST_URL,
+      token: Bun.env.UPSTASH_REDIS_REST_TOKEN,
     });
     this.logger = Logger.getInstance("production");
     this.metricsCollector = new MetricsCollector();
