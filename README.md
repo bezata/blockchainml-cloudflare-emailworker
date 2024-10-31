@@ -2,7 +2,7 @@
 ## This project is unlicensed and open-source. I don’t have much time, so I’m inviting you to continue this beautiful piece of art.
 A high-performance email processing system built on Cloudflare Workers, designed for handling enterprise-scale email operations.
 
-[![License](https://img.shields.io/badge/license-Private-red.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-Public-green.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-v18.0.0+-blue.svg)](package.json)
 [![TypeScript](https://img.shields.io/badge/typescript-v5.0.0+-blue.svg)](package.json)
 [![Cloudflare Workers](https://img.shields.io/badge/cloudflare%20workers-v3-orange.svg)](wrangler.toml)
