@@ -1,5 +1,5 @@
 # BlockchainML Cloudflare Mail Worker
-
+## This project is unlicensed and open-source. I don’t have much time, so I’m inviting you to continue this beautiful piece of art.
 A high-performance email processing system built on Cloudflare Workers, designed for handling enterprise-scale email operations.
 
 [![License](https://img.shields.io/badge/license-Private-red.svg)](LICENSE)
